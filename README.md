@@ -135,6 +135,16 @@ On the installed machine, **`kiosk.json`** lives under **`/home/kiosk/.config/`*
 
 `.gitattributes` forces **LF** line endings for `*.sh`, `*.py`, and `*.txt` so scripts run correctly on Linux.
 
+### Git: auto-renormalize on commit (optional)
+
+After cloning, point Git at the repo’s hooks once (from the repo root):
+
+```bash
+git config core.hooksPath githooks
+```
+
+Each **`git commit`** then runs **`git add --renormalize`** on **staged paths only**, so line endings match `.gitattributes` without restaging the whole tree.
+
 ## License
 
 Use and modify at your own risk for kiosk / signage deployments. No warranty implied.

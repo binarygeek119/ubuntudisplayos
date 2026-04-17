@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Re-apply .gitattributes EOL rules to paths staged for this commit only.
+mapfile -d '' -t _renorm < <(git diff --cached --name-only -z --diff-filter=ACMR)
+((${#_renorm[@]})) || exit 0
+git add --renormalize -- "${_renorm[@]}"
