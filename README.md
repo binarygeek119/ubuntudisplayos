@@ -31,6 +31,7 @@ The installer runs **`apt-get update`** then a noninteractive **`apt-get upgrade
 
 For fast reruns on an already prepared kiosk (refresh Openbox autostart, `kiosk.json` handling, LightDM snippets, and web UI/service wiring without apt work), use: **`KIOSK_UPDATE_ONLY=1 sudo ./install-kiosk.sh`** (requires an already installed Chrome/Chromium binary).
 Reruns also remove stale custom startup overrides that can break kiosk launch (`/etc/xdg/openbox/autostart`, `98-kiosk-session-hook.conf`, and old custom `kiosk-openbox` session wrappers).
+The installer now writes a dedicated LightDM session (`kiosk-openbox`) that explicitly runs `/home/kiosk/.config/openbox/autostart` before `openbox-session` so kiosk launch logic is consistent across machines.
 
 Next command to run on kiosk:
 
@@ -129,6 +130,8 @@ Use plain **HTTP** (not HTTPS). Replace **`<host>`** with the kiosk’s IP or ho
 | **After save** (redirect) | `http://<host>:8780/?ok=1` |
 | **Connected outputs (JSON)** | `http://<host>:8780/api/xrandr.json` |
 | **Save** (browser only) | `POST` to `http://<host>:8780/save` (use the form; no separate login page) |
+| **Reboot system** (browser button) | `POST` to `http://<host>:8780/reboot` |
+| **Update WebUI** (browser button) | `POST` to `http://<host>:8780/update` (runs installer refresh in background) |
 
 - **`BIND=0.0.0.0`** (default): listen on **all interfaces** — use the kiosk’s LAN address from another device, or `127.0.0.1` on the kiosk itself.
 - **`BIND=127.0.0.1`**: only **this machine** can open the URLs above; use SSH port forwarding to reach it remotely.
@@ -143,7 +146,7 @@ If a rotation does not apply on a specific host/GPU, check the kiosk log (`/home
 curl -sS http://127.0.0.1:8780/api/xrandr.json
 ```
 
-**Security:** there is **no authentication** on the web UI. Anyone who can reach the port can change kiosk URLs and display settings. For a closed network or single-machine use, set **`BIND=127.0.0.1`** in `/etc/kiosk-webui.env` and use SSH port forwarding if you need remote access. After editing the env file: `sudo systemctl restart kiosk-webui`.
+**Security:** there is **no authentication** on the web UI. Anyone who can reach the port can change kiosk URLs/settings, **trigger a reboot**, and run the **Update WebUI** action (installer grants `kiosk` passwordless access to limited helper commands via `/etc/sudoers.d/`). For a closed network or single-machine use, set **`BIND=127.0.0.1`** in `/etc/kiosk-webui.env` and use SSH port forwarding if you need remote access. After editing the env file: `sudo systemctl restart kiosk-webui`.
 
 ## Repository layout
 

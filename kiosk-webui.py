@@ -13,11 +13,18 @@ import pwd
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
+WEBUI_VERSION = "v1.0.0"
+DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
+_VERSION_CACHE_TTL_SEC = 300
+_version_cache_ts = 0.0
+_version_cache_payload: dict[str, str] | None = None
 
 
 def _conf() -> dict[str, str]:
@@ -183,15 +190,15 @@ def _display_row_labels(env_map: dict[str, str], user: str, home: str) -> list[s
         configured = [x.strip() for x in (env_map.get("OUTPUT_LIST") or "").split(",") if x.strip()]
         # If config has stale connector names from another machine, show live outputs.
         names = configured if all(n in connected for n in configured) else connected
+    if len(names) > MAX_SLOTS:
+        names = names[:MAX_SLOTS]
     out: list[str] = []
-    for i in range(MAX_SLOTS):
+    # Hide unused rows: only show detected/selected displays (at least one row for first-time setup).
+    if not names:
+        return ["Display 1 (no outputs detected yet)"]
+    for i in range(len(names)):
         idx = i + 1
-        if i < len(names):
-            out.append(f"Display {idx} — {names[i]}")
-        elif not names:
-            out.append(f"Display {idx} (set output_list=auto or run under X to detect outputs)")
-        else:
-            out.append(f"Display {idx} (beyond {len(names)} head(s); URL repeats last monitor on host)")
+        out.append(f"Display {idx} — {names[i]}")
     return out
 
 
@@ -202,6 +209,8 @@ h1 { font-size: 1.25rem; }
 label { display:block; margin-top:.5rem; font-size:.8rem; color:#9ca3af; }
 input, select { width:100%; padding:.4rem .5rem; border-radius:.35rem; border:1px solid #374151; background:#1f2937; color:#e5e7eb; }
 button { margin-top:1rem; padding:.55rem 1rem; border-radius:.35rem; border:0; background:#2563eb; color:#fff; cursor:pointer; }
+button.danger { background:#b91c1c; margin-left:.5rem; }
+button.warn { background:#92400e; margin-left:.5rem; }
 a { color:#93c5fd; }
 .grid { display:grid; grid-template-columns: minmax(10rem,1.1fr) 3rem 1fr 9rem; gap:.5rem .75rem; align-items:end; }
 .hdr { font-weight:600; color:#9ca3af; font-size:.75rem; margin-bottom:.25rem; }
@@ -219,11 +228,40 @@ def _sel(name: str, current: str) -> str:
     return f'<select name="{html.escape(name)}">{"".join(parts)}</select>'
 
 
+def _version_key(v: str) -> tuple[int, ...]:
+    nums = [int(x) for x in re.findall(r"\d+", v)]
+    return tuple(nums) if nums else (0,)
+
+
+def _fetch_latest_version() -> dict[str, str]:
+    """Return {'latest': 'vX.Y.Z'} when discoverable, with short in-process cache."""
+    global _version_cache_ts, _version_cache_payload
+    now = time.time()
+    if _version_cache_payload is not None and (now - _version_cache_ts) < _VERSION_CACHE_TTL_SEC:
+        return _version_cache_payload
+
+    out: dict[str, str] = {}
+    url = os.environ.get("KIOSK_WEBUI_VERSION_URL", DEFAULT_VERSION_URL)
+    try:
+        with urllib.request.urlopen(url, timeout=2.5) as resp:  # nosec - fixed HTTPS URL or explicit env override
+            text = resp.read().decode("utf-8", errors="replace")
+        m = re.search(r'^WEBUI_VERSION\s*=\s*"([^"]+)"', text, flags=re.MULTILINE)
+        if m:
+            out["latest"] = m.group(1).strip()
+    except OSError:
+        out = {}
+
+    _version_cache_payload = out
+    _version_cache_ts = now
+    return out
+
+
 def _form_page(
     env_map: dict[str, str],
     slots: list[tuple[str, str, str]],
     row_labels: list[str],
     msg: str,
+    update_banner: str,
 ) -> bytes:
     def g(key: str, default: str = "") -> str:
         return html.escape(env_map.get(key, default))
@@ -231,7 +269,9 @@ def _form_page(
     rows_html = [
         '<div class="grid hdr"><div>Monitor</div><div>Slot</div><div>URL for this display</div><div>Rotation</div></div>'
     ]
-    for j, (slot, u, r) in enumerate(slots):
+    visible_count = min(len(slots), max(1, len(row_labels)))
+    for j in range(visible_count):
+        slot, u, r = slots[j]
         lab = row_labels[j] if j < len(row_labels) else f"Display {j + 1}"
         rows_html.append(
             f'<div class="grid">'
@@ -247,10 +287,11 @@ def _form_page(
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Kiosk display config</title><style>{PAGE_CSS}</style></head><body>
-<h1>Kiosk — URLs per display</h1>
+<h1>Kiosk — URLs per display <span style="font-size:.8rem;color:#9ca3af;margin-left:.5rem">{WEBUI_VERSION}</span></h1>
 <p>All settings are saved to <code>kiosk.json</code> on this machine. <strong>Each row</strong> maps to one physical monitor (slot <code>01</code> = first in <code>OUTPUT_LIST</code>). The row URL opens in that monitor's fullscreen Chrome window. Empty URL clears that slot (trailing empty slots are dropped on save).</p>
-<p><code>OUTPUT_LIST</code>: comma-separated <code>xrandr</code> names, or <code>auto</code> for all connected heads. Up to <strong>{MAX_SLOTS}</strong> rows below.</p>
+<p><code>OUTPUT_LIST</code>: comma-separated <code>xrandr</code> names, or <code>auto</code> for all connected heads. Only detected displays are shown below.</p>
 {msg_html}
+{update_banner}
 <form method="post" action="/save">
   <label>OUTPUT_LIST</label>
   <input name="OUTPUT_LIST" value="{g('OUTPUT_LIST', 'auto')}" autocomplete="off"/>
@@ -268,9 +309,33 @@ def _form_page(
   {''.join(rows_html)}
   <button type="submit">Save to kiosk.json</button>
 </form>
+<form method="post" action="/reboot" onsubmit="return confirm('Reboot this kiosk now?');" style="margin-top:.75rem">
+  <button type="submit" class="danger">Reboot system</button>
+  <button type="submit" formaction="/update" class="warn" onclick="return confirm('Run installer update now? This may restart display services.');">Update WebUI</button>
+</form>
 <p><a href="/api/xrandr.json">Connected outputs (JSON)</a></p>
 </body></html>"""
     return body.encode("utf-8")
+
+
+def _request_reboot() -> None:
+    """Best-effort reboot request; installer grants kiosk NOPASSWD for this command."""
+    subprocess.run(
+        ["sudo", "-n", "/usr/bin/systemctl", "reboot"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _request_update() -> None:
+    """Launch installer refresh in background; helper script performs update and service refresh."""
+    subprocess.Popen(  # noqa: S603,S607
+        ["sudo", "-n", "/usr/local/bin/kiosk-self-update"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -299,12 +364,40 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         q = urllib.parse.parse_qs(parsed.query)
-        msg = "Saved." if q.get("ok", [""])[0] == "1" else ""
+        ok = q.get("ok", [""])[0]
+        msg = (
+            "Saved."
+            if ok == "1"
+            else (
+                "Reboot requested."
+                if ok == "2"
+                else (
+                    "Update started."
+                    if ok == "3"
+                    else (
+                        "Reboot failed (check sudoers)."
+                        if ok == "reboot_failed"
+                        else ("Update failed (check sudoers/script)." if ok == "update_failed" else "")
+                    )
+                )
+            )
+        )
         merged = _merge_kiosk(_load_kiosk_raw(path_json)) if os.path.isfile(path_json) else _default_kiosk()
         env_map = _form_env_map(merged)
         slots = _load_slots(merged)
         labels = _display_row_labels(env_map, user, home)
-        page = _form_page(env_map, slots, labels, msg)
+        ver = _fetch_latest_version()
+        latest = ver.get("latest", "").strip()
+        update_banner = ""
+        if latest and _version_key(latest) > _version_key(WEBUI_VERSION):
+            update_banner = (
+                '<div style="margin:.75rem 0;padding:.6rem .75rem;border:1px solid #7c2d12;'
+                'background:#431407;border-radius:.35rem;color:#fed7aa">'
+                f'New version available: <strong>{html.escape(latest)}</strong> '
+                f'(current {html.escape(WEBUI_VERSION)}). Click <strong>Update WebUI</strong> below.'
+                "</div>"
+            )
+        page = _form_page(env_map, slots, labels, msg, update_banner)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -313,6 +406,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/reboot":
+            try:
+                _request_reboot()
+                self.send_response(303)
+                self.send_header("Location", "/?ok=2")
+            except (OSError, subprocess.CalledProcessError):
+                self.send_response(303)
+                self.send_header("Location", "/?ok=reboot_failed")
+            self.end_headers()
+            return
+
+        if parsed.path == "/update":
+            try:
+                _request_update()
+                self.send_response(303)
+                self.send_header("Location", "/?ok=3")
+            except OSError:
+                self.send_response(303)
+                self.send_header("Location", "/?ok=update_failed")
+            self.end_headers()
+            return
+
         if parsed.path != "/save":
             self.send_response(404)
             self.end_headers()

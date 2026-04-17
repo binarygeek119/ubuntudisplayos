@@ -141,14 +141,9 @@ umask 077
 chmod 600 /root/kiosk-greeter-password.txt
 umask 022
 
-# Session id must match basename of /usr/share/xsessions/*.desktop (usually openbox).
-XSESSION_ID="openbox"
-while IFS= read -r -d '' f; do
-  if grep -qi 'openbox' "$f" 2>/dev/null; then
-    XSESSION_ID="$(basename "$f" .desktop)"
-    break
-  fi
-done < <(find /usr/share/xsessions -maxdepth 1 -name '*.desktop' -print0 2>/dev/null || true)
+# Session id must match basename of /usr/share/xsessions/*.desktop.
+# Use a dedicated wrapper so kiosk autostart is always launched on login.
+XSESSION_ID="kiosk-openbox"
 
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" "$KIOSK_HOME/.config/openbox"
 
@@ -642,8 +637,28 @@ chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config"
 # Remove stale/custom startup hooks that can bypass the managed autostart script.
 rm -f /etc/xdg/openbox/autostart
 rm -f /etc/lightdm/lightdm.conf.d/98-kiosk-session-hook.conf
-rm -f /usr/local/bin/kiosk-session-start /usr/local/bin/kiosk-openbox-session
-rm -f /usr/share/xsessions/kiosk-openbox.desktop
+rm -f /usr/local/bin/kiosk-session-start
+
+# Install dedicated LightDM session wrapper that always runs kiosk autostart.
+cat >/usr/local/bin/kiosk-openbox-session <<'KIOSKSESSION'
+#!/usr/bin/env bash
+set -e
+export HOME=/home/kiosk
+export USER=kiosk
+export LOGNAME=kiosk
+exec /bin/bash -lc '/home/kiosk/.config/openbox/autostart & exec openbox-session'
+KIOSKSESSION
+chmod 755 /usr/local/bin/kiosk-openbox-session
+
+cat >/usr/share/xsessions/kiosk-openbox.desktop <<'KIOSKDESKTOP'
+[Desktop Entry]
+Name=Kiosk Openbox
+Comment=Openbox kiosk session
+Exec=/usr/local/bin/kiosk-openbox-session
+Type=Application
+DesktopNames=KioskOpenbox
+KIOSKDESKTOP
+chmod 644 /usr/share/xsessions/kiosk-openbox.desktop
 
 install -d /etc/lightdm/lightdm.conf.d
 rm -f /etc/lightdm/lightdm.conf.d/50-kiosk-autologin.conf
@@ -729,6 +744,56 @@ if [[ -f "${WEBUI_SRC:-}" || -s /usr/lib/kiosk-webui/kiosk-webui.py ]]; then
   umask 022
   chown root:kiosk /etc/kiosk-webui.env 2>/dev/null || chown root:root /etc/kiosk-webui.env
   chmod 640 /etc/kiosk-webui.env
+
+  cat >/etc/sudoers.d/kiosk-webui-reboot <<'REBOOTSUDO'
+# Allow kiosk web UI service to trigger a controlled reboot without password.
+kiosk ALL=(root) NOPASSWD: /usr/bin/systemctl reboot, /sbin/reboot
+REBOOTSUDO
+  chmod 440 /etc/sudoers.d/kiosk-webui-reboot
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf /etc/sudoers.d/kiosk-webui-reboot >/dev/null || {
+      echo "ERROR: invalid sudoers file /etc/sudoers.d/kiosk-webui-reboot" >&2
+      exit 1
+    }
+  fi
+
+  # Persist installer source path and provide a root-owned self-update helper for the web UI.
+  printf '%s\n' "$SCRIPT_DIR" >/etc/kiosk-installer-path
+  chmod 644 /etc/kiosk-installer-path
+
+  cat >/usr/local/bin/kiosk-self-update <<'SELFUPDATE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH_FILE="/etc/kiosk-installer-path"
+[[ -f "$PATH_FILE" ]] || exit 1
+INSTALLER_DIR="$(cat "$PATH_FILE")"
+[[ -d "$INSTALLER_DIR" ]] || exit 1
+cd "$INSTALLER_DIR"
+
+if command -v git >/dev/null 2>&1 && [[ -d .git ]]; then
+  git pull --ff-only || true
+fi
+
+if [[ ! -x ./install-kiosk.sh ]]; then
+  chmod +x ./install-kiosk.sh
+fi
+
+KIOSK_SKIP_SYSTEM_UPGRADE=1 KIOSK_UPDATE_ONLY=1 ./install-kiosk.sh
+SELFUPDATE
+  chmod 755 /usr/local/bin/kiosk-self-update
+
+  cat >/etc/sudoers.d/kiosk-webui-update <<'UPDATESUDO'
+# Allow kiosk web UI service to run self-update helper without password.
+kiosk ALL=(root) NOPASSWD: /usr/local/bin/kiosk-self-update
+UPDATESUDO
+  chmod 440 /etc/sudoers.d/kiosk-webui-update
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf /etc/sudoers.d/kiosk-webui-update >/dev/null || {
+      echo "ERROR: invalid sudoers file /etc/sudoers.d/kiosk-webui-update" >&2
+      exit 1
+    }
+  fi
 
   cat >/etc/systemd/system/kiosk-webui.service <<'WEBUISVC'
 [Unit]
