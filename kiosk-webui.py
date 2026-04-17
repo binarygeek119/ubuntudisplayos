@@ -13,6 +13,7 @@ import pwd
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -258,6 +259,20 @@ def _fetch_latest_version() -> dict[str, str]:
     _version_cache_payload = out
     _version_cache_ts = now
     return out
+
+
+def _start_update_check_task() -> None:
+    """Background refresh of latest-version cache every N minutes."""
+    every_min = int(os.environ.get("KIOSK_WEBUI_UPDATE_CHECK_MIN", "10"))
+    every_min = 1 if every_min < 1 else every_min
+
+    def worker() -> None:
+        while True:
+            _fetch_latest_version()
+            time.sleep(every_min * 60)
+
+    t = threading.Thread(target=worker, name="kiosk-webui-update-check", daemon=True)
+    t.start()
 
 
 def _form_page(
@@ -507,6 +522,7 @@ def run() -> None:
     conf = _conf()
     host = conf.get("BIND", "127.0.0.1")
     port = int(conf.get("PORT", "8780"))
+    _start_update_check_task()
     httpd = HTTPServer((host, port), Handler)
     print(f"kiosk-webui listening on http://{host}:{port}/", flush=True)
     httpd.serve_forever()

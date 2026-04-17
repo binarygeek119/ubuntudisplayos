@@ -135,6 +135,7 @@ Use plain **HTTP** (not HTTPS). Replace **`<host>`** with the kiosk’s IP or ho
 
 - **`BIND=0.0.0.0`** (default): listen on **all interfaces** — use the kiosk’s LAN address from another device, or `127.0.0.1` on the kiosk itself.
 - **`BIND=127.0.0.1`**: only **this machine** can open the URLs above; use SSH port forwarding to reach it remotely.
+- **`KIOSK_WEBUI_UPDATE_CHECK_MIN`** (optional env var): background task interval (minutes) for checking whether a newer WebUI version exists; default **10**.
 
 The form edits **`output_list`**, global video settings, and up to **24** URL/rotation rows. Each row is labeled for the matching monitor (from `output_list` or live `xrandr` when `output_list` is `auto`). The URL in a row is what Chrome opens fullscreen on that monitor. Saving writes **`/home/kiosk/.config/kiosk.json`**; trailing rows with an empty URL are dropped.
 
