@@ -474,7 +474,26 @@ launch_kiosk() {
       prev="${KOUT[i]}"
     fi
   done
-  xrandr "${xr_args[@]}" || true
+  echo "[$(date '+%F %T')] applying xrandr: ${xr_args[*]}"
+  if ! xrandr "${xr_args[@]}"; then
+    echo "[$(date '+%F %T')] WARN: combined xrandr apply failed; retrying per-output"
+    # Some GPU/driver stacks reject a large combined command; retry output-by-output.
+    for ((i=0; i<n; i++)); do
+      if [[ "$i" -eq 0 ]]; then
+        if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+          xrandr --output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --primary --pos 0x0 || true
+        else
+          xrandr --output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --primary --pos 0x0 || true
+        fi
+      else
+        if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+          xrandr --output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --right-of "${KOUT[i-1]}" || true
+        else
+          xrandr --output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --right-of "${KOUT[i-1]}" || true
+        fi
+      fi
+    done
+  fi
   sleep 1
 
   G_W=(); G_H=(); G_X=(); G_Y=()

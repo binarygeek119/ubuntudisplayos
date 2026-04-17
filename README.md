@@ -120,6 +120,8 @@ Use plain **HTTP** (not HTTPS). Replace **`<host>`** with the kiosk’s IP or ho
 
 The form edits **`output_list`**, global video settings, and up to **24** URL/rotation rows. Each row is labeled for the matching monitor (from `output_list` or live `xrandr` when `output_list` is `auto`). The URL in a row is what Chrome opens fullscreen on that monitor. Saving writes **`/home/kiosk/.config/kiosk.json`**; trailing rows with an empty URL are dropped.
 
+If a rotation does not apply on a specific host/GPU, check the kiosk log (`/home/kiosk/.config/kiosk-autostart.log`) for `xrandr` warnings; the launcher now retries rotation per output when a combined `xrandr` command fails.
+
 **API example** (on the kiosk):
 
 ```bash
