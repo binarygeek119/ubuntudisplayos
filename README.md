@@ -8,7 +8,7 @@ Repository: [github.com/binarygeek119/ubuntudisplayos](https://github.com/binary
 
 ## Requirements
 
-- Ubuntu 24.04 (or similar) with root/sudo
+- Ubuntu 24.04.4 LTS with root/sudo
 - At least **one** physical display; **one Chrome window per connected output** when `output_list` is `auto`
 - Network access to install Google Chrome (or Chromium fallback)
 
