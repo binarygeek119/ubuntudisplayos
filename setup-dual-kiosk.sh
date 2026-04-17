@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# setup-dual-kiosk.sh - Ubuntu Server/Desktop 24.04 dual-display kiosk.
+# setup-dual-kiosk.sh - Ubuntu Server/Desktop 24.04 multi-display web kiosk.
 # Usage (as root): sudo ./setup-dual-kiosk.sh
-# By default picks any two connected outputs from xrandr (OUTPUT_LEFT/OUTPUT_RIGHT=auto).
+# Uses one URL file per display: kiosk-urls/01.txt … 99.txt; OUTPUT_LIST=auto uses all connected outputs.
 
 set -euo pipefail
 
@@ -9,16 +9,15 @@ set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: sudo $0" >&2
-  echo "URLs are read from /home/kiosk/.config/kiosk-urls/left.txt and right.txt" >&2
+  echo "URLs are read from /home/kiosk/.config/kiosk-urls/01.txt, 02.txt, … (one per display)" >&2
   exit 1
 fi
 
 KIOSK_USER="${KIOSK_USER:-kiosk}"
 KIOSK_HOME="/home/${KIOSK_USER}"
 
-# Defaults: first two connected outputs (auto); MODE=auto uses each panel's preferred mode.
-OUTPUT_LEFT="${OUTPUT_LEFT:-auto}"
-OUTPUT_RIGHT="${OUTPUT_RIGHT:-auto}"
+# Defaults: all connected outputs in xrandr order (OUTPUT_LIST=auto); MODE=auto per panel.
+OUTPUT_LIST="${OUTPUT_LIST:-auto}"
 MODE="${MODE:-auto}"
 SCREEN_WIDTH="${SCREEN_WIDTH:-1024}"
 SCREEN_HEIGHT="${SCREEN_HEIGHT:-768}"
@@ -98,34 +97,36 @@ done < <(find /usr/share/xsessions -maxdepth 1 -name '*.desktop' -print0 2>/dev/
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" "$KIOSK_HOME/.config/openbox"
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" "$KIOSK_HOME/.config/kiosk-urls"
 
-# Migrate old single-file URL config if present.
-if [[ -s "$KIOSK_HOME/.config/kiosk-url/display.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/left.txt" ]]; then
-  head -n 2 "$KIOSK_HOME/.config/kiosk-url/display.txt" >"$KIOSK_HOME/.config/kiosk-urls/left.txt" || true
+# Migrate old URL layouts → numbered slots 01.txt, 02.txt
+if [[ -s "$KIOSK_HOME/.config/kiosk-url/display.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/01.txt" ]]; then
+  head -n 2 "$KIOSK_HOME/.config/kiosk-url/display.txt" >"$KIOSK_HOME/.config/kiosk-urls/01.txt" || true
 fi
-if [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/left.txt" ]]; then
+if [[ -s "$KIOSK_HOME/.config/kiosk-urls/left.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/01.txt" ]]; then
+  cp -a "$KIOSK_HOME/.config/kiosk-urls/left.txt" "$KIOSK_HOME/.config/kiosk-urls/01.txt" || true
+fi
+if [[ -s "$KIOSK_HOME/.config/kiosk-urls/right.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/02.txt" ]]; then
+  cp -a "$KIOSK_HOME/.config/kiosk-urls/right.txt" "$KIOSK_HOME/.config/kiosk-urls/02.txt" || true
+fi
+if [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/01.txt" ]]; then
   {
     printf '%s\n' "http://127.0.0.1:9877"
     printf '%s\n' "normal"
-  } >"$KIOSK_HOME/.config/kiosk-urls/left.txt"
+  } >"$KIOSK_HOME/.config/kiosk-urls/01.txt"
 fi
-if [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/right.txt" ]]; then
+if [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/02.txt" ]]; then
   {
     printf '%s\n' "http://127.0.0.1:9876"
     printf '%s\n' "normal"
-  } >"$KIOSK_HOME/.config/kiosk-urls/right.txt"
+  } >"$KIOSK_HOME/.config/kiosk-urls/02.txt"
 fi
-chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/kiosk-urls/left.txt" "$KIOSK_HOME/.config/kiosk-urls/right.txt"
-chmod 600 "$KIOSK_HOME/.config/kiosk-urls/left.txt" "$KIOSK_HOME/.config/kiosk-urls/right.txt"
+chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/kiosk-urls"
+chmod 600 "$KIOSK_HOME"/.config/kiosk-urls/*.txt 2>/dev/null || true
 
 {
-  printf '# OUTPUT_LEFT / OUTPUT_RIGHT: output names from xrandr, or "auto" to pick any two connected screens.\n'
-  printf '# URL files (line1=URL, line2=rotation normal|left|right|inverted):\n'
-  printf '#   %s\n' "$KIOSK_HOME/.config/kiosk-urls/left.txt"
-  printf '#   %s\n' "$KIOSK_HOME/.config/kiosk-urls/right.txt"
-  printf 'URL_LEFT_FILE=%q\n' "$KIOSK_HOME/.config/kiosk-urls/left.txt"
-  printf 'URL_RIGHT_FILE=%q\n' "$KIOSK_HOME/.config/kiosk-urls/right.txt"
-  printf 'OUTPUT_LEFT=%q\n' "$OUTPUT_LEFT"
-  printf 'OUTPUT_RIGHT=%q\n' "$OUTPUT_RIGHT"
+  printf '# KIOSK_URL_DIR: one file per display: 01.txt, 02.txt, … (line1=URL, line2=rotation).\n'
+  printf '# OUTPUT_LIST: comma-separated xrandr output names, or "auto" for all connected (in probe order).\n'
+  printf 'KIOSK_URL_DIR=%q\n' "$KIOSK_HOME/.config/kiosk-urls"
+  printf 'OUTPUT_LIST=%q\n' "$OUTPUT_LIST"
   printf 'MODE=%q\n' "$MODE"
   printf 'SCREEN_WIDTH=%q\n' "$SCREEN_WIDTH"
   printf 'SCREEN_HEIGHT=%q\n' "$SCREEN_HEIGHT"
@@ -142,6 +143,22 @@ set -a
 . "${HOME}/.config/kiosk.env"
 set +a
 
+# Legacy kiosk.env used OUTPUT_LEFT/OUTPUT_RIGHT instead of OUTPUT_LIST.
+if [[ -z "${OUTPUT_LIST:-}" && ( -n "${OUTPUT_LEFT:-}" || -n "${OUTPUT_RIGHT:-}" ) ]]; then
+  OUTPUT_LIST="${OUTPUT_LEFT:-auto},${OUTPUT_RIGHT:-auto}"
+fi
+OUTPUT_LIST="${OUTPUT_LIST:-auto}"
+
+KIOSK_URL_DIR="${KIOSK_URL_DIR:-${HOME}/.config/kiosk-urls}"
+KOUT=()
+KU_URL=()
+KU_ROT=()
+KIOSK_PIDS=()
+G_W=()
+G_H=()
+G_X=()
+G_Y=()
+
 xset s off
 xset -dpms
 xset s noblank
@@ -152,7 +169,7 @@ xsetroot -cursor_name none 2>/dev/null || true
 LOG_FILE="${HOME}/.config/kiosk-autostart.log"
 touch "$LOG_FILE"
 exec >>"$LOG_FILE" 2>&1
-echo "[$(date '+%F %T')] kiosk autostart started"
+echo "[$(date '+%F %T')] kiosk autostart started (multi-display)"
 
 CHROME_FLAGS=(
   --kiosk --noerrdialogs --disable-infobars --no-first-run
@@ -160,9 +177,6 @@ CHROME_FLAGS=(
   --disable-features=TranslateUI
   --new-window
 )
-CHROME_LEFT_PROFILE="${HOME}/.config/chrome-kiosk-left"
-CHROME_RIGHT_PROFILE="${HOME}/.config/chrome-kiosk-right"
-mkdir -p "$CHROME_LEFT_PROFILE" "$CHROME_RIGHT_PROFILE"
 
 resolve_browser_bin() {
   if [[ -n "${CHROME_BIN:-}" && -x "${CHROME_BIN}" ]]; then
@@ -179,168 +193,210 @@ resolve_browser_bin() {
   return 1
 }
 
-read_kiosk_state() {
-  URL_LEFT="$(awk 'NF {gsub(/\r/, ""); print; exit}' "${URL_LEFT_FILE}")"
-  URL_RIGHT="$(awk 'NF {gsub(/\r/, ""); print; exit}' "${URL_RIGHT_FILE}")"
-  ROTATE_LEFT="$(awk 'NF {c++; if (c==2) {gsub(/\r/, ""); print tolower($0); exit}}' "${URL_LEFT_FILE}")"
-  ROTATE_RIGHT="$(awk 'NF {c++; if (c==2) {gsub(/\r/, ""); print tolower($0); exit}}' "${URL_RIGHT_FILE}")"
-  ROTATE_LEFT="${ROTATE_LEFT:-normal}"
-  ROTATE_RIGHT="${ROTATE_RIGHT:-normal}"
-  case "$ROTATE_LEFT" in normal|left|right|inverted) ;; *) ROTATE_LEFT="normal" ;; esac
-  case "$ROTATE_RIGHT" in normal|left|right|inverted) ;; *) ROTATE_RIGHT="normal" ;; esac
-}
-
-is_auto_output() {
+is_auto_list() {
   case "${1:-}" in ''|auto|detect|any) return 0 ;; *) return 1 ;; esac
 }
 
-detect_outputs() {
-  mapfile -t _xr < <(xrandr --query | awk '/ connected/{print $1}')
-  local n="${#_xr[@]}"
-  echo "[$(date '+%F %T')] connected outputs (${n}): $(printf '%s ' "${_xr[@]}")"
-  if [[ "$n" -lt 2 ]]; then
-    echo "[$(date '+%F %T')] ERROR: need 2 connected displays (found ${n})"
+read_url_slots() {
+  KU_URL=()
+  KU_ROT=()
+  local f u r
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    u="$(awk 'NF {gsub(/\r/, ""); print; exit}' "$f")"
+    r="$(awk 'NF {c++; if (c==2) {gsub(/\r/, ""); print tolower($0); exit}}' "$f")"
+    r="${r:-normal}"
+    case "$r" in normal|left|right|inverted) ;; *) r="normal" ;; esac
+    KU_URL+=("$u")
+    KU_ROT+=("$r")
+  done < <(find "${KIOSK_URL_DIR}" -maxdepth 1 -name '[0-9][0-9].txt' -type f | LC_ALL=C sort)
+}
+
+read_kiosk_state() {
+  read_url_slots
+}
+
+build_kout_array() {
+  mapfile -t _conn < <(xrandr --query | awk '/ connected/{print $1}')
+  local nc="${#_conn[@]}"
+  KOUT=()
+  if [[ "$nc" -lt 1 ]]; then
+    echo "[$(date '+%F %T')] ERROR: no connected displays"
     return 1
   fi
-  if is_auto_output "${OUTPUT_LEFT}"; then
-    if is_auto_output "${OUTPUT_RIGHT}"; then
-      OUTPUT_LEFT="${_xr[0]}"
-    else
-      OUTPUT_LEFT=""
-      for c in "${_xr[@]}"; do
-        if [[ "$c" != "${OUTPUT_RIGHT}" ]]; then
-          OUTPUT_LEFT="$c"
-          break
-        fi
+  if is_auto_list "${OUTPUT_LIST:-}"; then
+    KOUT=("${_conn[@]}")
+  else
+    local part name ok c
+    local _parts
+    IFS=',' read -ra _parts <<< "$OUTPUT_LIST"
+    for part in "${_parts[@]}"; do
+      name="${part//[[:space:]]/}"
+      [[ -z "$name" ]] && continue
+      ok=0
+      for c in "${_conn[@]}"; do
+        if [[ "$c" == "$name" ]]; then ok=1; break; fi
       done
-      [[ -z "${OUTPUT_LEFT}" ]] && OUTPUT_LEFT="${_xr[0]}"
-    fi
-  fi
-  if is_auto_output "${OUTPUT_RIGHT}"; then
-    OUTPUT_RIGHT=""
-    for c in "${_xr[@]}"; do
-      if [[ "$c" != "${OUTPUT_LEFT}" ]]; then
-        OUTPUT_RIGHT="$c"
-        break
+      if [[ "$ok" -eq 0 ]]; then
+        echo "[$(date '+%F %T')] ERROR: OUTPUT_LIST entry not connected: ${name}"
+        return 1
       fi
+      KOUT+=("$name")
     done
-    [[ -z "${OUTPUT_RIGHT}" ]] && OUTPUT_RIGHT="${_xr[1]}"
   fi
-  echo "[$(date '+%F %T')] using: left=${OUTPUT_LEFT} right=${OUTPUT_RIGHT}"
+  if [[ ${#KOUT[@]} -lt 1 ]]; then
+    echo "[$(date '+%F %T')] ERROR: empty OUTPUT_LIST"
+    return 1
+  fi
+  echo "[$(date '+%F %T')] displays (${#KOUT[@]}): $(printf '%s ' "${KOUT[@]}")"
   return 0
 }
 
-# Parse WxH+X+Y from `xrandr --query` line for a connected output (e.g. 1440x900+0+0).
-parse_output_geom() {
-  local out="$1"
-  local tok
-  tok="$(xrandr --query | awk -v o="$out" '$1==o && /connected/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+\*?\+[0-9]+\+[0-9]+$/) { print $i; exit } }')"
-  if [[ -z "$tok" ]]; then
+pad_urls_to_outputs() {
+  local n="$1" lastu lastr
+  if [[ ${#KU_URL[@]} -lt 1 ]]; then
+    echo "[$(date '+%F %T')] waiting: no URL slot files (need ${KIOSK_URL_DIR}/01.txt …)"
     return 1
   fi
+  while [[ ${#KU_URL[@]} -lt "$n" ]]; do
+    lastu="${KU_URL[-1]}"
+    lastr="${KU_ROT[-1]}"
+    KU_URL+=("$lastu")
+    KU_ROT+=("$lastr")
+  done
+  while [[ ${#KU_URL[@]} -gt "$n" ]]; do
+    unset 'KU_URL[-1]'
+    unset 'KU_ROT[-1]'
+  done
+}
+
+# WxH+X+Y token from xrandr line for output $1 → GEO_W GEO_H GEO_X GEO_Y
+parse_output_geom() {
+  local out="$1"
+  local tok rest rest2
+  tok="$(xrandr --query | awk -v o="$out" '$1==o && /connected/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+\*?\+[0-9]+\+[0-9]+$/) { print $i; exit } }')"
+  [[ -z "$tok" ]] && return 1
   tok="${tok//\*}"
   GEO_W="${tok%%x*}"
-  local rest="${tok#*x}"
+  rest="${tok#*x}"
   GEO_H="${rest%%+*}"
-  local rest2="${rest#*+}"
+  rest2="${rest#*+}"
   GEO_X="${rest2%%+*}"
   GEO_Y="${rest2#*+}"
   return 0
 }
 
-refresh_chrome_geometry() {
-  GEO_L_X=0 GEO_L_Y=0 GEO_L_W="${SCREEN_WIDTH}" GEO_L_H="${SCREEN_HEIGHT}"
-  GEO_R_X="${SCREEN_WIDTH}" GEO_R_Y=0 GEO_R_W="${SCREEN_WIDTH}" GEO_R_H="${SCREEN_HEIGHT}"
-  case "$ROTATE_LEFT" in left|right) GEO_L_W="${SCREEN_HEIGHT}"; GEO_L_H="${SCREEN_WIDTH}" ;; esac
-  case "$ROTATE_RIGHT" in left|right) GEO_R_W="${SCREEN_HEIGHT}"; GEO_R_H="${SCREEN_WIDTH}" ;; esac
-
-  if parse_output_geom "${OUTPUT_LEFT}"; then
-    GEO_L_W="$GEO_W"
-    GEO_L_H="$GEO_H"
-    GEO_L_X="$GEO_X"
-    GEO_L_Y="$GEO_Y"
-  fi
-  if parse_output_geom "${OUTPUT_RIGHT}"; then
-    GEO_R_W="$GEO_W"
-    GEO_R_H="$GEO_H"
-    GEO_R_X="$GEO_X"
-    GEO_R_Y="$GEO_Y"
-  fi
-  echo "[$(date '+%F %T')] layout ${OUTPUT_LEFT}=${GEO_L_W}x${GEO_L_H}+${GEO_L_X}+${GEO_L_Y} ${OUTPUT_RIGHT}=${GEO_R_W}x${GEO_R_H}+${GEO_R_X}+${GEO_R_Y}"
-}
-
 launch_kiosk() {
-  if [[ -z "${URL_LEFT}" || -z "${URL_RIGHT}" ]]; then
-    echo "[$(date '+%F %T')] waiting: URL file empty"
-    return 1
-  fi
+  read_url_slots
   if ! resolve_browser_bin; then
     return 1
   fi
-  if ! detect_outputs; then
+  if ! build_kout_array; then
+    return 1
+  fi
+  local n="${#KOUT[@]}"
+  if ! pad_urls_to_outputs "$n"; then
     return 1
   fi
 
-  if [[ -n "${OUTPUT_LEFT:-}" && -n "${OUTPUT_RIGHT:-}" ]]; then
-    # --right-of avoids mirrored +0+0 when MODE=auto picks different sizes than SCREEN_*.
-    if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
-      xrandr --output "$OUTPUT_LEFT" --auto --rotate "$ROTATE_LEFT" --primary --pos 0x0 \
-             --output "$OUTPUT_RIGHT" --auto --rotate "$ROTATE_RIGHT" --right-of "$OUTPUT_LEFT" || true
+  local i prev xr_args=()
+  for ((i=0; i<n; i++)); do
+    if [[ "$i" -eq 0 ]]; then
+      if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+        xr_args+=(--output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --primary --pos 0x0)
+      else
+        xr_args+=(--output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --primary --pos 0x0)
+      fi
+      prev="${KOUT[i]}"
     else
-      xrandr --output "$OUTPUT_LEFT" --mode "$MODE" --rotate "$ROTATE_LEFT" --primary --pos 0x0 \
-             --output "$OUTPUT_RIGHT" --mode "$MODE" --rotate "$ROTATE_RIGHT" --right-of "$OUTPUT_LEFT" || true
+      if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+        xr_args+=(--output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --right-of "$prev")
+      else
+        xr_args+=(--output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --right-of "$prev")
+      fi
+      prev="${KOUT[i]}"
     fi
-    sleep 1
-    refresh_chrome_geometry
-  else
-    refresh_chrome_geometry
-  fi
+  done
+  xrandr "${xr_args[@]}" || true
+  sleep 1
 
-  # Avoid "Opening in existing browser session": kill stale browser processes.
+  G_W=(); G_H=(); G_X=(); G_Y=()
+  for ((i=0; i<n; i++)); do
+    if parse_output_geom "${KOUT[i]}"; then
+      G_W+=("$GEO_W")
+      G_H+=("$GEO_H")
+      G_X+=("$GEO_X")
+      G_Y+=("$GEO_Y")
+    else
+      G_W+=("${SCREEN_WIDTH}")
+      G_H+=("${SCREEN_HEIGHT}")
+      G_X+=(0)
+      G_Y+=(0)
+    fi
+  done
+  echo "[$(date '+%F %T')] geometry: $(for ((i=0;i<n;i++)); do printf '%s=%sx%s+%s+%s ' "${KOUT[i]}" "${G_W[i]}" "${G_H[i]}" "${G_X[i]}" "${G_Y[i]}"; done)"
+
   pkill -9 -f 'google-chrome|chromium' 2>/dev/null || true
   sleep 1
 
-  "$CHROME_BIN" "${CHROME_FLAGS[@]}" \
-    --user-data-dir="${CHROME_LEFT_PROFILE}" \
-    --window-position="${GEO_L_X},${GEO_L_Y}" \
-    --window-size="${GEO_L_W},${GEO_L_H}" \
-    "$URL_LEFT" &
-  LEFT_PID=$!
-
-  "$CHROME_BIN" "${CHROME_FLAGS[@]}" \
-    --user-data-dir="${CHROME_RIGHT_PROFILE}" \
-    --window-position="${GEO_R_X},${GEO_R_Y}" \
-    --window-size="${GEO_R_W},${GEO_R_H}" \
-    "$URL_RIGHT" &
-  RIGHT_PID=$!
-  echo "[$(date '+%F %T')] launched left=${URL_LEFT} right=${URL_RIGHT} rotate=(${ROTATE_LEFT},${ROTATE_RIGHT})"
+  KIOSK_PIDS=()
+  local prof
+  for ((i=0; i<n; i++)); do
+    prof="${HOME}/.config/chrome-kiosk-$(printf '%02d' "$i")"
+    mkdir -p "$prof"
+    u="${KU_URL[i]}"
+    [[ -z "$u" ]] && u="about:blank"
+    "$CHROME_BIN" "${CHROME_FLAGS[@]}" \
+      --user-data-dir="$prof" \
+      --window-position="${G_X[i]},${G_Y[i]}" \
+      --window-size="${G_W[i]},${G_H[i]}" \
+      "$u" &
+    KIOSK_PIDS+=($!)
+  done
+  echo "[$(date '+%F %T')] launched ${#KIOSK_PIDS[@]} kiosk window(s)"
   return 0
 }
 
 stop_kiosk() {
-  if [[ -n "${LEFT_PID:-}" ]]; then kill "$LEFT_PID" 2>/dev/null || true; fi
-  if [[ -n "${RIGHT_PID:-}" ]]; then kill "$RIGHT_PID" 2>/dev/null || true; fi
-  wait "${LEFT_PID:-}" 2>/dev/null || true
-  wait "${RIGHT_PID:-}" 2>/dev/null || true
-  LEFT_PID=""
-  RIGHT_PID=""
+  local pid
+  for pid in "${KIOSK_PIDS[@]:-}"; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  done
+  for pid in "${KIOSK_PIDS[@]:-}"; do
+    [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+  done
+  KIOSK_PIDS=()
+}
+
+state_fingerprint() {
+  read_url_slots
+  local out="" i
+  for ((i=0; i<${#KU_URL[@]}; i++)); do
+    out+="${KU_URL[i]}#${KU_ROT[i]}|"
+  done
+  printf '%s' "$out"
+}
+
+url_dir_sig() {
+  find "${KIOSK_URL_DIR}" -maxdepth 1 -name '[0-9][0-9].txt' -type f -printf '%f %T@\n' 2>/dev/null | LC_ALL=C sort | tr '\n' '|'
 }
 
 (
   LAST_STATE=""
-  LEFT_PID=""
-  RIGHT_PID=""
+  KIOSK_PIDS=()
   while true; do
     read_kiosk_state
     XR_SIG="$(xrandr --query 2>/dev/null | awk '/ connected/{printf "%s,", $1}' | sed 's/,$//')"
     ENV_SIG="$(stat -c %Y "${HOME}/.config/kiosk.env" 2>/dev/null || echo 0)"
-    CURRENT_STATE="${URL_LEFT}|${URL_RIGHT}|${ROTATE_LEFT}|${ROTATE_RIGHT}|${XR_SIG}|${ENV_SIG}"
-    LEFT_DEAD=0
-    RIGHT_DEAD=0
-    if [[ -n "${LEFT_PID}" ]] && ! kill -0 "${LEFT_PID}" 2>/dev/null; then LEFT_DEAD=1; fi
-    if [[ -n "${RIGHT_PID}" ]] && ! kill -0 "${RIGHT_PID}" 2>/dev/null; then RIGHT_DEAD=1; fi
-    if [[ "$CURRENT_STATE" != "$LAST_STATE" || "$LEFT_DEAD" -eq 1 || "$RIGHT_DEAD" -eq 1 ]]; then
-      if [[ "$LEFT_DEAD" -eq 1 || "$RIGHT_DEAD" -eq 1 ]]; then
+    UF_SIG="$(url_dir_sig)"
+    URL_STATE="$(state_fingerprint)"
+    CURRENT_STATE="${OUTPUT_LIST:-}|${URL_STATE}|${XR_SIG}|${ENV_SIG}|${UF_SIG}"
+    ANY_DEAD=0
+    for pid in "${KIOSK_PIDS[@]:-}"; do
+      if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then ANY_DEAD=1; break; fi
+    done
+    if [[ "$CURRENT_STATE" != "$LAST_STATE" || "$ANY_DEAD" -eq 1 ]]; then
+      if [[ "$ANY_DEAD" -eq 1 ]]; then
         echo "[$(date '+%F %T')] detected browser exit; relaunching"
       fi
       stop_kiosk
@@ -450,13 +506,10 @@ echo "Greeter fallback password for user '${KIOSK_USER}' (if autologin fails):"
 echo "  sudo cat /root/kiosk-greeter-password.txt"
 echo "Or from a text console: Ctrl+Alt+F3, login as root, then: cat /root/kiosk-greeter-password.txt"
 echo "LightDM X session: ${XSESSION_ID}"
-echo "URLs are loaded from:"
-echo "  ${KIOSK_HOME}/.config/kiosk-urls/left.txt  (first detected / left screen)"
-echo "  ${KIOSK_HOME}/.config/kiosk-urls/right.txt (second detected / right screen)"
-echo "Format each file: line1=URL, line2=rotation (normal|left|right|inverted)"
-echo "Displays: set OUTPUT_LEFT/OUTPUT_RIGHT to xrandr names, or leave as auto to use any two connected outputs."
-echo "If a screen is wrong or black, edit ${KIOSK_HOME}/.config/kiosk.env"
-echo "  (OUTPUT_LEFT, OUTPUT_RIGHT, MODE=auto|WxH, SCREEN_WIDTH/HEIGHT for window sizing fallback)."
+echo "URLs: one file per display — ${KIOSK_HOME}/.config/kiosk-urls/01.txt … 99.txt"
+echo "  (line1=URL, line2=rotation: normal|left|right|inverted). Fewer files than displays repeats the last URL."
+echo "Displays: OUTPUT_LIST=auto uses all connected outputs in xrandr order; or comma-separated names."
+echo "Edit ${KIOSK_HOME}/.config/kiosk.env or use the web UI (see /root/kiosk-webui-token.txt)."
 if [[ -f /opt/kiosk-webui/kiosk-webui.py ]]; then
   echo "Web UI (display + URLs): http://<host>:8780/?token=...  — token: sudo cat /root/kiosk-webui-token.txt"
 fi

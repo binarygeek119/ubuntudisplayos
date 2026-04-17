@@ -2,9 +2,11 @@
 """
 Minimal kiosk display / URL config web UI (Python 3 stdlib only).
 Config: /etc/kiosk-webui.env (TOKEN=..., BIND=0.0.0.0, PORT=8780)
+Supports multiple displays via kiosk-urls/01.txt … and OUTPUT_LIST in kiosk.env.
 """
 from __future__ import annotations
 
+import glob
 import html
 import json
 import os
@@ -15,6 +17,8 @@ import subprocess
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+MAX_SLOTS = 16
 
 
 def _conf() -> dict[str, str]:
@@ -66,13 +70,11 @@ def _parse_env(content: str) -> dict[str, str]:
     return d
 
 
-def _write_env(path: str, keys: dict[str, str], url_left_file: str, url_right_file: str) -> None:
+def _write_env(path: str, keys: dict[str, str], url_dir: str) -> None:
     lines = [
         "# Managed by kiosk-webui.",
-        f"URL_LEFT_FILE={shlex.quote(url_left_file)}",
-        f"URL_RIGHT_FILE={shlex.quote(url_right_file)}",
-        f"OUTPUT_LEFT={shlex.quote(keys.get('OUTPUT_LEFT', 'auto'))}",
-        f"OUTPUT_RIGHT={shlex.quote(keys.get('OUTPUT_RIGHT', 'auto'))}",
+        f"KIOSK_URL_DIR={shlex.quote(url_dir)}",
+        f"OUTPUT_LIST={shlex.quote(keys.get('OUTPUT_LIST', 'auto'))}",
         f"MODE={shlex.quote(keys.get('MODE', 'auto'))}",
         f"SCREEN_WIDTH={shlex.quote(keys.get('SCREEN_WIDTH', '1024'))}",
         f"SCREEN_HEIGHT={shlex.quote(keys.get('SCREEN_HEIGHT', '768'))}",
@@ -92,6 +94,22 @@ def _write_url_file(path: str, url: str, rotation: str) -> None:
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(url + "\n" + rotation + "\n")
     os.replace(tmp, path)
+
+
+def _load_slots(dir_urls: str) -> list[tuple[str, str, str]]:
+    """Return (slot, url, rot) for 01..MAX_SLOTS, reading files when present."""
+    rows: list[tuple[str, str, str]] = []
+    for i in range(1, MAX_SLOTS + 1):
+        slot = f"{i:02d}"
+        p = os.path.join(dir_urls, f"{slot}.txt")
+        txt = _read_text(p) if os.path.isfile(p) else ""
+        lines = [ln.rstrip("\r") for ln in txt.splitlines() if ln.strip() != ""]
+        u = lines[0] if lines else ""
+        r = lines[1] if len(lines) > 1 else "normal"
+        if r not in ("normal", "left", "right", "inverted"):
+            r = "normal"
+        rows.append((slot, u, r))
+    return rows
 
 
 def _xrandr_json(user: str, home: str) -> str:
@@ -134,15 +152,15 @@ def _token_from_request(handler: BaseHTTPRequestHandler, form_token: str | None)
 
 PAGE_CSS = """
 :root { font-family: system-ui, sans-serif; background:#111827; color:#e5e7eb; }
-body { max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+body { max-width: 56rem; margin: 2rem auto; padding: 0 1rem; }
 h1 { font-size: 1.25rem; }
-label { display:block; margin-top:.75rem; font-size:.85rem; color:#9ca3af; }
-input, select, textarea { width:100%; padding:.45rem .55rem; border-radius:.35rem; border:1px solid #374151; background:#1f2937; color:#e5e7eb; }
+label { display:block; margin-top:.5rem; font-size:.8rem; color:#9ca3af; }
+input, select { width:100%; padding:.4rem .5rem; border-radius:.35rem; border:1px solid #374151; background:#1f2937; color:#e5e7eb; }
 button { margin-top:1rem; padding:.55rem 1rem; border-radius:.35rem; border:0; background:#2563eb; color:#fff; cursor:pointer; }
-pre { background:#0b1220; padding:1rem; border-radius:.35rem; overflow:auto; font-size:.8rem; }
 a { color:#93c5fd; }
-.row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
-@media (max-width:700px){ .row { grid-template-columns:1fr; } }
+.grid { display:grid; grid-template-columns: 4rem 1fr 9rem; gap:.5rem .75rem; align-items:end; }
+.hdr { font-weight:600; color:#9ca3af; font-size:.75rem; margin-bottom:.25rem; }
+@media (max-width:700px){ .grid { grid-template-columns:1fr; } }
 """
 
 
@@ -152,88 +170,53 @@ def _sel(name: str, current: str) -> str:
     for o in opts:
         sel = " selected" if o == current else ""
         parts.append(f'<option value="{o}"{sel}>{html.escape(o)}</option>')
-    return f'<select name="{name}">{"".join(parts)}</select>'
+    return f'<select name="{html.escape(name)}">{"".join(parts)}</select>'
 
 
 def _form_page(
     env: dict[str, str],
-    left_lines: str,
-    right_lines: str,
+    slots: list[tuple[str, str, str]],
     msg: str,
     token_value: str,
 ) -> bytes:
     def g(key: str, default: str = "") -> str:
         return html.escape(env.get(key, default))
 
-    def split_url_rot(block: str) -> tuple[str, str]:
-        lines = [ln.rstrip("\r") for ln in block.splitlines() if ln.strip() != ""]
-        u = lines[0] if lines else ""
-        r = lines[1] if len(lines) > 1 else "normal"
-        return u, r
-
-    lu, lr = split_url_rot(left_lines)
-    ru, rr = split_url_rot(right_lines)
-    lr = lr if lr in ("normal", "left", "right", "inverted") else "normal"
-    rr = rr if rr in ("normal", "left", "right", "inverted") else "normal"
+    rows_html = ['<div class="grid hdr"><div>#</div><div>URL</div><div>Rotation</div></div>']
+    for slot, u, r in slots:
+        rows_html.append(
+            f'<div class="grid"><div style="padding:.4rem 0">{html.escape(slot)}</div>'
+            f'<div><input name="URL_{slot}" value="{html.escape(u)}" placeholder="empty = remove file" autocomplete="off"/></div>'
+            f'<div>{_sel(f"ROT_{slot}", r)}</div></div>'
+        )
 
     msg_html = f'<p style="color:#86efac">{html.escape(msg)}</p>' if msg else ""
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Kiosk display config</title><style>{PAGE_CSS}</style></head><body>
-<h1>Kiosk display &amp; URLs</h1>
-<p>Set <code>OUTPUT_*</code> to an xrandr name, or <code>auto</code> for any two connected displays. Saving updates <code>kiosk.env</code> and URL files; the kiosk session picks up changes within a few seconds.</p>
-<p>Use header <code>X-Kiosk-Token</code> or open with <code>?token=…</code> (see <code>/etc/kiosk-webui.env</code>).</p>
+<h1>Kiosk — multi-display</h1>
+<p><code>OUTPUT_LIST</code>: comma-separated xrandr names, or <code>auto</code> for <strong>all connected</strong> outputs in order. One URL file per display: <code>01.txt</code> … <code>{MAX_SLOTS:02d}.txt</code> (line1=URL, line2=rotation).</p>
+<p>Auth: header <code>X-Kiosk-Token</code> or <code>?token=…</code> (see <code>/etc/kiosk-webui.env</code>).</p>
 {msg_html}
 <form method="post" action="/save">
   <input type="hidden" name="token" value="{html.escape(token_value)}"/>
-  <div class="row">
-    <div>
-      <label>OUTPUT_LEFT</label>
-      <input name="OUTPUT_LEFT" value="{g('OUTPUT_LEFT','auto')}" autocomplete="off"/>
-    </div>
-    <div>
-      <label>OUTPUT_RIGHT</label>
-      <input name="OUTPUT_RIGHT" value="{g('OUTPUT_RIGHT','auto')}" autocomplete="off"/>
-    </div>
+  <label>OUTPUT_LIST</label>
+  <input name="OUTPUT_LIST" value="{g('OUTPUT_LIST', 'auto')}" autocomplete="off"/>
+  <div class="grid" style="margin-top:1rem">
+    <div><label>MODE</label><input name="MODE" value="{g('MODE', 'auto')}" autocomplete="off"/></div>
+    <div><label>CHROME_BIN</label><input name="CHROME_BIN" value="{g('CHROME_BIN', '/usr/bin/google-chrome-stable')}" autocomplete="off"/></div>
+    <div></div>
   </div>
-  <div class="row">
-    <div>
-      <label>MODE (auto or e.g. 1920x1080)</label>
-      <input name="MODE" value="{g('MODE','auto')}" autocomplete="off"/>
-    </div>
-    <div>
-      <label>CHROME_BIN</label>
-      <input name="CHROME_BIN" value="{g('CHROME_BIN','/usr/bin/google-chrome-stable')}" autocomplete="off"/>
-    </div>
+  <div class="grid" style="margin-top:.5rem">
+    <div><label>SCREEN_WIDTH</label><input name="SCREEN_WIDTH" value="{g('SCREEN_WIDTH', '1024')}" autocomplete="off"/></div>
+    <div><label>SCREEN_HEIGHT</label><input name="SCREEN_HEIGHT" value="{g('SCREEN_HEIGHT', '768')}" autocomplete="off"/></div>
+    <div></div>
   </div>
-  <div class="row">
-    <div>
-      <label>SCREEN_WIDTH (fallback)</label>
-      <input name="SCREEN_WIDTH" value="{g('SCREEN_WIDTH','1024')}" autocomplete="off"/>
-    </div>
-    <div>
-      <label>SCREEN_HEIGHT</label>
-      <input name="SCREEN_HEIGHT" value="{g('SCREEN_HEIGHT','768')}" autocomplete="off"/>
-    </div>
-  </div>
-  <hr style="border-color:#374151;margin:1.25rem 0"/>
-  <div class="row">
-    <div>
-      <label>Left screen — URL</label>
-      <input name="URL_LEFT" value="{html.escape(lu)}" autocomplete="off"/>
-      <label>Left screen — rotation</label>
-      {_sel("ROT_LEFT", lr)}
-    </div>
-    <div>
-      <label>Right screen — URL</label>
-      <input name="URL_RIGHT" value="{html.escape(ru)}" autocomplete="off"/>
-      <label>Right screen — rotation</label>
-      {_sel("ROT_RIGHT", rr)}
-    </div>
-  </div>
+  <h2 style="margin-top:1.5rem;font-size:1rem">URLs per display</h2>
+  {''.join(rows_html)}
   <button type="submit">Save</button>
 </form>
-<p><a href="/api/xrandr.json?token={html.escape(urllib.parse.quote(token_value, safe=''))}">JSON: connected outputs</a></p>
+<p><a href="/api/xrandr.json?token={html.escape(urllib.parse.quote(token_value, safe=''))}">Connected outputs (JSON)</a></p>
 </body></html>"""
     return body.encode("utf-8")
 
@@ -286,10 +269,9 @@ class Handler(BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(parsed.query)
         msg = "Saved." if q.get("ok", [""])[0] == "1" else ""
         env_map = _parse_env(_read_text(path_env))
-        left_txt = _read_text(f"{dir_urls}/left.txt", "http://127.0.0.1:9877\nnormal\n")
-        right_txt = _read_text(f"{dir_urls}/right.txt", "http://127.0.0.1:9876\nnormal\n")
+        slots = _load_slots(dir_urls)
         token_q = q.get("token", [tok])[0]
-        page = _form_page(env_map, left_txt, right_txt, msg, token_q)
+        page = _form_page(env_map, slots, msg, token_q)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -323,21 +305,32 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(dir_urls, mode=0o700, exist_ok=True)
 
         keys = {
-            "OUTPUT_LEFT": one("OUTPUT_LEFT") or "auto",
-            "OUTPUT_RIGHT": one("OUTPUT_RIGHT") or "auto",
+            "OUTPUT_LIST": one("OUTPUT_LIST") or "auto",
             "MODE": one("MODE") or "auto",
             "SCREEN_WIDTH": re.sub(r"[^0-9]", "", one("SCREEN_WIDTH")) or "1024",
             "SCREEN_HEIGHT": re.sub(r"[^0-9]", "", one("SCREEN_HEIGHT")) or "768",
             "CHROME_BIN": one("CHROME_BIN") or "/usr/bin/google-chrome-stable",
         }
-        path_left = f"{dir_urls}/left.txt"
-        path_right = f"{dir_urls}/right.txt"
-        _write_env(path_env, keys, path_left, path_right)
-        _write_url_file(path_left, one("URL_LEFT"), one("ROT_LEFT"))
-        _write_url_file(path_right, one("URL_RIGHT"), one("ROT_RIGHT"))
+        _write_env(path_env, keys, dir_urls)
+
+        for i in range(1, MAX_SLOTS + 1):
+            slot = f"{i:02d}"
+            u = one(f"URL_{slot}")
+            r = one(f"ROT_{slot}") or "normal"
+            path = os.path.join(dir_urls, f"{slot}.txt")
+            if u:
+                _write_url_file(path, u, r)
+            elif os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
         try:
             pw = pwd.getpwnam(user)
-            for p in (path_env, path_left, path_right):
+            os.chown(path_env, pw.pw_uid, pw.pw_gid)
+            os.chmod(path_env, 0o600)
+            for p in glob.glob(os.path.join(dir_urls, "[0-9][0-9].txt")):
                 os.chown(p, pw.pw_uid, pw.pw_gid)
                 os.chmod(p, 0o600)
         except OSError:
