@@ -29,6 +29,8 @@ sudo reboot
 
 The installer runs **`apt-get update`** then a noninteractive **`apt-get upgrade`** (updates installed packages without **`full-upgrade`** / **`dist-upgrade`**). To skip that step (faster reruns or air‑gapped hosts): **`KIOSK_SKIP_SYSTEM_UPGRADE=1 sudo ./install-kiosk.sh`**.
 
+For fast reruns on an already prepared kiosk (refresh Openbox autostart, `kiosk.json` handling, LightDM snippets, and web UI/service wiring without apt work), use: **`KIOSK_UPDATE_ONLY=1 sudo ./install-kiosk.sh`**.
+
 The **web UI** is installed to **`/usr/lib/kiosk-webui/kiosk-webui.py`** (plus **`/usr/bin/kiosk-webui`**, **`kiosk-webui.service`**, and the **“Kiosk display config”** menu entry) when **`install-kiosk.sh`** can find **`kiosk-webui.py`**: same folder as the script, **`KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py`**, or—if the machine has network—by **downloading** from GitHub (`main` branch) unless **`KIOSK_WEBUI_SKIP_DOWNLOAD=1`**. Override the URL with **`KIOSK_WEBUI_URL=…`** if needed.
 
 ## Configuration
@@ -48,6 +50,8 @@ Everything the kiosk session and web UI need lives in **`/home/kiosk/.config/kio
 **`rotation`** values: `normal`, `left`, `right`, `inverted`.
 
 If you have **more monitors than non-empty URLs** in `displays`, the **last** defined URL (and its rotation) is **repeated** for the extra heads. If you have **fewer monitors than entries**, extra `displays` entries are ignored for layout (only the first *N* are used, where *N* = number of outputs in use).
+
+If you move the install to another PC and connector names changed, the launcher automatically falls back to all currently connected outputs (auto order) instead of failing on stale `output_list` names.
 
 Changes are applied immediately when you click **Save** in the web UI (it writes `kiosk.json` and triggers a browser relaunch). Direct edits to **`kiosk.json`** are also picked up by the watcher within a few seconds.
 
@@ -76,6 +80,7 @@ The installer aims to keep panels awake around the clock:
 - **systemd-logind** (`/etc/systemd/logind.conf.d/99-kiosk-no-sleep.conf`): lid and idle sleep ignored; **`sleep.target` / `suspend.target` / `hibernate.target` / `hybrid-sleep.target`** are masked.
 - **Xorg** (`/etc/X11/xorg.conf.d/10-kiosk-no-blanking.conf`): server blank/standby/suspend/off timers set to **0** (the default X blank interval is often ~10 minutes otherwise).
 - **Openbox session** (`kiosk` autostart): **`xset`** turns off the screensaver, **DPMS**, and “noblank”; the URL watcher **re-applies** those settings about every minute in case a driver or browser toggles them back.
+- **Chrome session locks:** before launching kiosk windows, the autostart script clears stale Chrome/Chromium singleton lock/socket files to avoid “Opening in existing browser session” on reboot or crash recovery.
 - **Kernel** (`/etc/default/grub.d/zz-kiosk-consoleblank.cfg`): **`consoleblank=0`** on the kernel command line (after `update-grub` + reboot) so text virtual consoles do not blank independently of X.
 
 If a **TV or monitor** still powers down, check its own **ECO / power timer / HDMI CEC** menus; that behavior is outside the PC.

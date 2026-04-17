@@ -13,6 +13,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Web UI: installs to /usr/lib/kiosk-webui/ if kiosk-webui.py is next to this script," >&2
   echo "  or set KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py, or omit KIOSK_WEBUI_SKIP_DOWNLOAD=1 to fetch from GitHub." >&2
   echo "System upgrade: apt upgrade runs after apt update (set KIOSK_SKIP_SYSTEM_UPGRADE=1 to skip)." >&2
+  echo "Rerun mode: set KIOSK_UPDATE_ONLY=1 to skip apt update/upgrade/install and only refresh kiosk config/services." >&2
   exit 1
 fi
 
@@ -27,20 +28,24 @@ SCREEN_HEIGHT="${SCREEN_HEIGHT:-768}"
 
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update -y
+if [[ "${KIOSK_UPDATE_ONLY:-0}" != "1" ]]; then
+  apt-get update -y
 
-# Upgrade installed packages to latest versions in this release (no full-upgrade / dist-upgrade).
-if [[ "${KIOSK_SKIP_SYSTEM_UPGRADE:-0}" != "1" ]]; then
-  export NEEDRESTART_MODE=a
-  apt-get upgrade -y \
-    -o Dpkg::Options::=--force-confdef \
-    -o Dpkg::Options::=--force-confold
+  # Upgrade installed packages to latest versions in this release (no full-upgrade / dist-upgrade).
+  if [[ "${KIOSK_SKIP_SYSTEM_UPGRADE:-0}" != "1" ]]; then
+    export NEEDRESTART_MODE=a
+    apt-get upgrade -y \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold
+  fi
+
+  apt-get install -y --no-install-recommends \
+    xorg openbox lightdm lightdm-gtk-greeter \
+    x11-xserver-utils unclutter-xfixes dbus-x11 wget curl ca-certificates \
+    python3-minimal
+else
+  echo "KIOSK_UPDATE_ONLY=1: skipping apt update/upgrade/install; refreshing kiosk configs/services only."
 fi
-
-apt-get install -y --no-install-recommends \
-  xorg openbox lightdm lightdm-gtk-greeter \
-  x11-xserver-utils unclutter-xfixes dbus-x11 wget curl ca-certificates \
-  python3-minimal
 
 # Keep kiosk systems always awake: disable suspend/hibernate/idle sleep globally.
 install -d /etc/systemd/logind.conf.d
@@ -329,6 +334,15 @@ resolve_browser_bin() {
   return 1
 }
 
+clear_chrome_singleton_locks() {
+  # Stale singleton files can force "Opening in existing browser session".
+  local d
+  for d in "${HOME}/.config/google-chrome" "${HOME}/.config/chromium" "${HOME}"/.config/chrome-kiosk-*; do
+    [[ -d "$d" ]] || continue
+    rm -f "$d/SingletonLock" "$d/SingletonCookie" "$d/SingletonSocket" 2>/dev/null || true
+  done
+}
+
 is_auto_list() {
   case "${1:-}" in ''|auto|detect|any) return 0 ;; *) return 1 ;; esac
 }
@@ -384,7 +398,7 @@ build_kout_array() {
   if is_auto_list "${OUTPUT_LIST:-}"; then
     KOUT=("${_conn[@]}")
   else
-    local part name ok c
+    local part name ok c bad=0
     local _parts
     IFS=',' read -ra _parts <<< "$OUTPUT_LIST"
     for part in "${_parts[@]}"; do
@@ -395,11 +409,18 @@ build_kout_array() {
         if [[ "$c" == "$name" ]]; then ok=1; break; fi
       done
       if [[ "$ok" -eq 0 ]]; then
-        echo "[$(date '+%F %T')] ERROR: OUTPUT_LIST entry not connected: ${name}"
-        return 1
+        echo "[$(date '+%F %T')] WARN: OUTPUT_LIST entry not connected on this PC: ${name}"
+        bad=1
+        break
       fi
       KOUT+=("$name")
     done
+    # Moving disks between machines often changes connector names (HDMI-1 vs DP-1, etc).
+    # Fallback to all connected outputs so kiosk still comes up on new hardware.
+    if [[ "$bad" -eq 1 || ${#KOUT[@]} -lt 1 ]]; then
+      echo "[$(date '+%F %T')] WARN: falling back to connected outputs (auto order)"
+      KOUT=("${_conn[@]}")
+    fi
   fi
   if [[ ${#KOUT[@]} -lt 1 ]]; then
     echo "[$(date '+%F %T')] ERROR: empty OUTPUT_LIST"
@@ -514,6 +535,7 @@ launch_kiosk() {
 
   pkill -9 -f 'google-chrome|chromium' 2>/dev/null || true
   sleep 1
+  clear_chrome_singleton_locks
 
   KIOSK_PIDS=()
   local prof

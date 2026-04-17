@@ -175,11 +175,14 @@ def _connected_output_names(user: str, home: str) -> list[str]:
 
 
 def _display_row_labels(env_map: dict[str, str], user: str, home: str) -> list[str]:
+    connected = _connected_output_names(user, home)
     ol = (env_map.get("OUTPUT_LIST") or "auto").strip().lower()
     if ol in ("", "auto", "detect", "any"):
-        names = _connected_output_names(user, home)
+        names = connected
     else:
-        names = [x.strip() for x in (env_map.get("OUTPUT_LIST") or "").split(",") if x.strip()]
+        configured = [x.strip() for x in (env_map.get("OUTPUT_LIST") or "").split(",") if x.strip()]
+        # If config has stale connector names from another machine, show live outputs.
+        names = configured if all(n in connected for n in configured) else connected
     out: list[str] = []
     for i in range(MAX_SLOTS):
         idx = i + 1
