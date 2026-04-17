@@ -332,7 +332,12 @@ echo "[$(date '+%F %T')] kiosk autostart started (multi-display)"
 CHROME_FLAGS=(
   --kiosk --noerrdialogs --disable-infobars --no-first-run
   --disable-session-crashed-bubble --disable-restore-session-state
-  --disable-features=TranslateUI
+  --disable-features=TranslateUI,CalculateNativeWinOcclusion
+  --disable-backgrounding-occluded-windows
+  --disable-renderer-backgrounding
+  --disable-background-timer-throttling
+  --disable-gpu
+  --disable-dev-shm-usage
   --new-window
 )
 
