@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.1"
+WEBUI_VERSION = "v1.0.2"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
 _version_cache_ts = 0.0
