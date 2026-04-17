@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# setup-dual-kiosk.sh - Ubuntu Server/Desktop 24.04 multi-display web kiosk.
-# Usage (as root): sudo ./setup-dual-kiosk.sh
-# Uses one URL file per display: kiosk-urls/01.txt … 99.txt; OUTPUT_LIST=auto uses all connected outputs.
+# install-kiosk.sh - Ubuntu Server/Desktop 24.04 multi-display web kiosk.
+# Usage (as root): sudo ./install-kiosk.sh
+# Uses ~/.config/kiosk.json for OUTPUT_LIST, MODE, URLs per display, etc.; OUTPUT_LIST=auto uses all connected outputs.
 
 set -euo pipefail
 
@@ -9,7 +9,9 @@ set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "Usage: sudo $0" >&2
-  echo "URLs are read from /home/kiosk/.config/kiosk-urls/01.txt, 02.txt, … (one per display)" >&2
+  echo "URLs and layout are read from /home/kiosk/.config/kiosk.json" >&2
+  echo "Web UI: installs to /usr/lib/kiosk-webui/ if kiosk-webui.py is next to this script," >&2
+  echo "  or set KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py, or omit KIOSK_WEBUI_SKIP_DOWNLOAD=1 to fetch from GitHub." >&2
   exit 1
 fi
 
@@ -27,8 +29,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
   xorg openbox lightdm lightdm-gtk-greeter \
-  x11-xserver-utils unclutter-xfixes dbus-x11 wget ca-certificates \
-  python3-minimal openssl
+  x11-xserver-utils unclutter-xfixes dbus-x11 wget curl ca-certificates \
+  python3-minimal
 
 # Keep kiosk systems always awake: disable suspend/hibernate/idle sleep globally.
 install -d /etc/systemd/logind.conf.d
@@ -44,6 +46,27 @@ IdleActionSec=0
 EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
 systemctl restart systemd-logind
+
+# Xorg defaults often blank after ~10 minutes; disable server timers + DPMS at config level.
+install -d /etc/X11/xorg.conf.d
+cat >/etc/X11/xorg.conf.d/10-kiosk-no-blanking.conf <<'EOF'
+Section "ServerFlags"
+    Option "BlankTime" "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime" "0"
+EndSection
+EOF
+
+# Linux virtual console blanking (separate from X); harmless for pure GUI kiosk.
+install -d /etc/default/grub.d
+cat >/etc/default/grub.d/zz-kiosk-consoleblank.cfg <<'EOF'
+# Kiosk: do not blank the text console (add-on to X blanking fixes).
+GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }consoleblank=0"
+EOF
+if command -v update-grub >/dev/null 2>&1; then
+  update-grub || true
+fi
 
 # Google Chrome (stable kiosk); fall back to Chromium from apt if needed.
 CHROME_BIN=""
@@ -95,61 +118,158 @@ while IFS= read -r -d '' f; do
 done < <(find /usr/share/xsessions -maxdepth 1 -name '*.desktop' -print0 2>/dev/null || true)
 
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" "$KIOSK_HOME/.config/openbox"
-install -d -o "$KIOSK_USER" -g "$KIOSK_USER" "$KIOSK_HOME/.config/kiosk-urls"
 
-# Migrate old URL layouts → numbered slots 01.txt, 02.txt
-if [[ -s "$KIOSK_HOME/.config/kiosk-url/display.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/01.txt" ]]; then
-  head -n 2 "$KIOSK_HOME/.config/kiosk-url/display.txt" >"$KIOSK_HOME/.config/kiosk-urls/01.txt" || true
-fi
-if [[ -s "$KIOSK_HOME/.config/kiosk-urls/left.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/01.txt" ]]; then
-  cp -a "$KIOSK_HOME/.config/kiosk-urls/left.txt" "$KIOSK_HOME/.config/kiosk-urls/01.txt" || true
-fi
-if [[ -s "$KIOSK_HOME/.config/kiosk-urls/right.txt" ]] && [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/02.txt" ]]; then
-  cp -a "$KIOSK_HOME/.config/kiosk-urls/right.txt" "$KIOSK_HOME/.config/kiosk-urls/02.txt" || true
-fi
-if [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/01.txt" ]]; then
-  {
-    printf '%s\n' "http://127.0.0.1:9877"
-    printf '%s\n' "normal"
-  } >"$KIOSK_HOME/.config/kiosk-urls/01.txt"
-fi
-if [[ ! -s "$KIOSK_HOME/.config/kiosk-urls/02.txt" ]]; then
-  {
-    printf '%s\n' "http://127.0.0.1:9876"
-    printf '%s\n' "normal"
-  } >"$KIOSK_HOME/.config/kiosk-urls/02.txt"
-fi
-chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/kiosk-urls"
-chmod 600 "$KIOSK_HOME"/.config/kiosk-urls/*.txt 2>/dev/null || true
+# Single JSON config: ~/.config/kiosk.json (replaces kiosk.env + kiosk-urls/*.txt).
+python3 - "${KIOSK_HOME}" "${OUTPUT_LIST}" "${MODE}" "${SCREEN_WIDTH}" "${SCREEN_HEIGHT}" "${CHROME_BIN}" <<'KIOSKJSON'
+import json, pathlib, sys
 
-{
-  printf '# KIOSK_URL_DIR: one file per display: 01.txt, 02.txt, … (line1=URL, line2=rotation).\n'
-  printf '# OUTPUT_LIST: comma-separated xrandr output names, or "auto" for all connected (in probe order).\n'
-  printf 'KIOSK_URL_DIR=%q\n' "$KIOSK_HOME/.config/kiosk-urls"
-  printf 'OUTPUT_LIST=%q\n' "$OUTPUT_LIST"
-  printf 'MODE=%q\n' "$MODE"
-  printf 'SCREEN_WIDTH=%q\n' "$SCREEN_WIDTH"
-  printf 'SCREEN_HEIGHT=%q\n' "$SCREEN_HEIGHT"
-  printf 'CHROME_BIN=%q\n' "$CHROME_BIN"
-} >"$KIOSK_HOME/.config/kiosk.env"
-chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/kiosk.env"
-chmod 600 "$KIOSK_HOME/.config/kiosk.env"
+home = pathlib.Path(sys.argv[1])
+ol, mode, sw, sh, cb = (sys.argv[i] if len(sys.argv) > i else "" for i in range(2, 7))
+cfg = home / ".config" / "kiosk.json"
+if cfg.is_file():
+    sys.exit(0)
+
+defaults_disp = [
+    {"url": "http://127.0.0.1:9877", "rotation": "normal"},
+    {"url": "http://127.0.0.1:9876", "rotation": "normal"},
+]
+
+
+def parse_env(path: pathlib.Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def read_slot_txt(path: pathlib.Path) -> dict | None:
+    if not path.is_file():
+        return None
+    lines = [ln.strip() for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    u = lines[0]
+    r = lines[1].lower() if len(lines) > 1 else "normal"
+    if r not in ("normal", "left", "right", "inverted"):
+        r = "normal"
+    return {"url": u, "rotation": r}
+
+
+def displays_from_url_dir(url_dir: pathlib.Path) -> list:
+    disp: list = []
+    for p in sorted(url_dir.glob("[0-9][0-9].txt")):
+        slot = read_slot_txt(p)
+        if slot:
+            disp.append(slot)
+    return disp
+
+
+data = {
+    "output_list": ol or "auto",
+    "mode": mode or "auto",
+    "screen_width": sw or "1024",
+    "screen_height": sh or "768",
+    "chrome_bin": cb or "/usr/bin/google-chrome-stable",
+    "displays": list(defaults_disp),
+}
+
+env_path = home / ".config" / "kiosk.env"
+if env_path.is_file():
+    e = parse_env(env_path)
+    if e.get("OUTPUT_LIST"):
+        data["output_list"] = e["OUTPUT_LIST"]
+    elif e.get("OUTPUT_LEFT") or e.get("OUTPUT_RIGHT"):
+        data["output_list"] = f'{e.get("OUTPUT_LEFT", "auto")},{e.get("OUTPUT_RIGHT", "auto")}'
+    if e.get("MODE"):
+        data["mode"] = e["MODE"]
+    if e.get("SCREEN_WIDTH"):
+        data["screen_width"] = e["SCREEN_WIDTH"]
+    if e.get("SCREEN_HEIGHT"):
+        data["screen_height"] = e["SCREEN_HEIGHT"]
+    if e.get("CHROME_BIN"):
+        data["chrome_bin"] = e["CHROME_BIN"]
+
+url_dir = home / ".config" / "kiosk-urls"
+migrated = displays_from_url_dir(url_dir)
+if migrated:
+    data["displays"] = migrated
+else:
+    legacy = home / ".config" / "kiosk-url" / "display.txt"
+    slot = read_slot_txt(legacy)
+    if slot:
+        data["displays"] = [slot]
+
+cfg.parent.mkdir(parents=True, exist_ok=True)
+with cfg.open("w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+KIOSKJSON
+chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/kiosk.json" 2>/dev/null || true
+chmod 600 "$KIOSK_HOME/.config/kiosk.json" 2>/dev/null || true
 
 cat >"$KIOSK_HOME/.config/openbox/autostart" <<'AUTOSTART'
 #!/bin/bash
 set -euo pipefail
-set -a
-# shellcheck source=/dev/null
-. "${HOME}/.config/kiosk.env"
-set +a
 
-# Legacy kiosk.env used OUTPUT_LEFT/OUTPUT_RIGHT instead of OUTPUT_LIST.
-if [[ -z "${OUTPUT_LIST:-}" && ( -n "${OUTPUT_LEFT:-}" || -n "${OUTPUT_RIGHT:-}" ) ]]; then
-  OUTPUT_LIST="${OUTPUT_LEFT:-auto},${OUTPUT_RIGHT:-auto}"
-fi
+KIOSK_JSON="${HOME}/.config/kiosk.json"
+
+load_kiosk_json() {
+  eval "$(python3 - "$KIOSK_JSON" <<'LOADPY'
+import json, shlex, sys
+
+path = sys.argv[1]
+defaults = {
+    "output_list": "auto",
+    "mode": "auto",
+    "screen_width": "1024",
+    "screen_height": "768",
+    "chrome_bin": "/usr/bin/google-chrome-stable",
+    "displays": [
+        {"url": "http://127.0.0.1:9877", "rotation": "normal"},
+        {"url": "http://127.0.0.1:9876", "rotation": "normal"},
+    ],
+}
+try:
+    with open(path, encoding="utf-8") as f:
+        c = json.load(f)
+        if not isinstance(c, dict):
+            c = {}
+except (OSError, json.JSONDecodeError):
+    c = {}
+merged = {**defaults, **{k: v for k, v in c.items() if k != "displays"}}
+disp = c.get("displays")
+if isinstance(disp, list) and disp:
+    merged["displays"] = disp
+else:
+    merged["displays"] = defaults["displays"]
+
+
+def q(x):
+    return shlex.quote(str(x))
+
+
+m = merged
+print(f'OUTPUT_LIST={q(m.get("output_list", "auto"))}')
+print(f'MODE={q(m.get("mode", "auto"))}')
+print(f'SCREEN_WIDTH={q(m.get("screen_width", "1024"))}')
+print(f'SCREEN_HEIGHT={q(m.get("screen_height", "768"))}')
+print(f'CHROME_BIN={q(m.get("chrome_bin", "/usr/bin/google-chrome-stable"))}')
+LOADPY
+)"
+}
+
+load_kiosk_json
 OUTPUT_LIST="${OUTPUT_LIST:-auto}"
 
-KIOSK_URL_DIR="${KIOSK_URL_DIR:-${HOME}/.config/kiosk-urls}"
 KOUT=()
 KU_URL=()
 KU_ROT=()
@@ -159,9 +279,15 @@ G_H=()
 G_X=()
 G_Y=()
 
-xset s off
-xset -dpms
-xset s noblank
+kiosk_keep_display_on() {
+  # Drivers or clients sometimes re-enable DPMS; safe to call repeatedly.
+  xset s off 2>/dev/null || true
+  xset s noblank 2>/dev/null || true
+  xset -dpms 2>/dev/null || true
+  xset dpms force on 2>/dev/null || true
+}
+
+kiosk_keep_display_on
 
 unclutter -idle 0 -root &
 xsetroot -cursor_name none 2>/dev/null || true
@@ -200,16 +326,37 @@ is_auto_list() {
 read_url_slots() {
   KU_URL=()
   KU_ROT=()
-  local f u r
-  while IFS= read -r f; do
-    [[ -f "$f" ]] || continue
-    u="$(awk 'NF {gsub(/\r/, ""); print; exit}' "$f")"
-    r="$(awk 'NF {c++; if (c==2) {gsub(/\r/, ""); print tolower($0); exit}}' "$f")"
+  [[ -f "$KIOSK_JSON" ]] || return 1
+  local u r
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    u="${line%%$'\t'*}"
+    r="${line#*$'\t'}"
     r="${r:-normal}"
     case "$r" in normal|left|right|inverted) ;; *) r="normal" ;; esac
     KU_URL+=("$u")
     KU_ROT+=("$r")
-  done < <(find "${KIOSK_URL_DIR}" -maxdepth 1 -name '[0-9][0-9].txt' -type f | LC_ALL=C sort)
+  done < <(python3 - "$KIOSK_JSON" <<'URLPY'
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as f:
+        c = json.load(f)
+except (OSError, json.JSONDecodeError):
+    c = {}
+for d in c.get("displays") or []:
+    if not isinstance(d, dict):
+        continue
+    u = (d.get("url") or "").strip()
+    if not u:
+        continue
+    r = (d.get("rotation") or "normal").strip().lower() or "normal"
+    if r not in ("normal", "left", "right", "inverted"):
+        r = "normal"
+    print(u + "\t" + r)
+URLPY
+)
 }
 
 read_kiosk_state() {
@@ -255,7 +402,7 @@ build_kout_array() {
 pad_urls_to_outputs() {
   local n="$1" lastu lastr
   if [[ ${#KU_URL[@]} -lt 1 ]]; then
-    echo "[$(date '+%F %T')] waiting: no URL slot files (need ${KIOSK_URL_DIR}/01.txt …)"
+    echo "[$(date '+%F %T')] waiting: no URLs in ${KIOSK_JSON} (displays[].url)"
     return 1
   fi
   while [[ ${#KU_URL[@]} -lt "$n" ]]; do
@@ -377,20 +524,26 @@ state_fingerprint() {
   printf '%s' "$out"
 }
 
-url_dir_sig() {
-  find "${KIOSK_URL_DIR}" -maxdepth 1 -name '[0-9][0-9].txt' -type f -printf '%f %T@\n' 2>/dev/null | LC_ALL=C sort | tr '\n' '|'
+kiosk_json_sig() {
+  stat -c %Y "${KIOSK_JSON}" 2>/dev/null || echo 0
 }
 
 (
   LAST_STATE=""
   KIOSK_PIDS=()
+  TICK=0
   while true; do
+    TICK=$((TICK + 1))
+    # Re-apply ~every 60s (loop sleeps 2s) so blanking stays off if something toggles DPMS.
+    if (( TICK % 30 == 0 )); then
+      kiosk_keep_display_on
+    fi
+    load_kiosk_json
     read_kiosk_state
     XR_SIG="$(xrandr --query 2>/dev/null | awk '/ connected/{printf "%s,", $1}' | sed 's/,$//')"
-    ENV_SIG="$(stat -c %Y "${HOME}/.config/kiosk.env" 2>/dev/null || echo 0)"
-    UF_SIG="$(url_dir_sig)"
+    CFG_SIG="$(kiosk_json_sig)"
     URL_STATE="$(state_fingerprint)"
-    CURRENT_STATE="${OUTPUT_LIST:-}|${URL_STATE}|${XR_SIG}|${ENV_SIG}|${UF_SIG}"
+    CURRENT_STATE="${OUTPUT_LIST:-}|${URL_STATE}|${XR_SIG}|${CFG_SIG}"
     ANY_DEAD=0
     for pid in "${KIOSK_PIDS[@]:-}"; do
       if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then ANY_DEAD=1; break; fi
@@ -446,16 +599,50 @@ systemctl disable sddm 2>/dev/null || true
 systemctl enable lightdm
 systemctl restart lightdm 2>/dev/null || true
 
-# Optional web UI to edit display + URLs (token in /etc/kiosk-webui.env).
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WEBUI_SRC="${SCRIPT_DIR}/kiosk-webui.py"
-install -d /opt/kiosk-webui
-if [[ -f "$WEBUI_SRC" ]]; then
-  install -m 755 "$WEBUI_SRC" /opt/kiosk-webui/kiosk-webui.py
-  WEBUI_TOKEN="$(openssl rand -hex 24)"
+# Web UI: install /usr/lib/kiosk-webui/kiosk-webui.py (local path, KIOSK_WEBUI_SRC, or GitHub download).
+_THIS="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1; then
+  _THIS="$(readlink -f "$_THIS" 2>/dev/null || echo "$_THIS")"
+fi
+SCRIPT_DIR="$(cd "$(dirname "$_THIS")" && pwd)"
+WEBUI_SRC=""
+CLEAN_TMP_WEBUI=""
+if [[ -n "${KIOSK_WEBUI_SRC:-}" && -f "${KIOSK_WEBUI_SRC}" ]]; then
+  WEBUI_SRC="${KIOSK_WEBUI_SRC}"
+else
+  for _cand in "$SCRIPT_DIR/kiosk-webui.py" "$SCRIPT_DIR/../kiosk-webui.py" "$(pwd)/kiosk-webui.py"; do
+    [[ -f "$_cand" ]] || continue
+    WEBUI_SRC="$_cand"
+    break
+  done
+fi
+if [[ ! -f "${WEBUI_SRC:-}" && "${KIOSK_WEBUI_SKIP_DOWNLOAD:-0}" != "1" ]]; then
+  _url="${KIOSK_WEBUI_URL:-https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py}"
+  tmpdl="$(mktemp /tmp/kiosk-webui.XXXXXX)"
+  if wget -qO "$tmpdl" "$_url" 2>/dev/null || curl -fsSL -o "$tmpdl" "$_url" 2>/dev/null; then
+    WEBUI_SRC="$tmpdl"
+    CLEAN_TMP_WEBUI=1
+  fi
+fi
+
+if [[ -f "${WEBUI_SRC:-}" ]]; then
+  apt-get install -y --no-install-recommends xdg-utils
+
+  rm -rf /opt/kiosk-webui
+  rm -f /root/kiosk-webui-token.txt
+
+  install -d /usr/lib/kiosk-webui
+  install -m 755 "$WEBUI_SRC" /usr/lib/kiosk-webui/kiosk-webui.py
+  ln -sf /usr/lib/kiosk-webui/kiosk-webui.py /usr/bin/kiosk-webui
+  [[ -s /usr/lib/kiosk-webui/kiosk-webui.py ]] || {
+    echo "ERROR: /usr/lib/kiosk-webui/kiosk-webui.py is missing or empty after install." >&2
+    exit 1
+  }
+  [[ -n "$CLEAN_TMP_WEBUI" ]] && rm -f "$WEBUI_SRC"
+
   umask 077
   {
-    printf 'TOKEN=%s\n' "$WEBUI_TOKEN"
+    printf '%s\n' '# Listen address and port (plain http://HOST:PORT/ — no auth).'
     printf '%s\n' 'BIND=0.0.0.0'
     printf '%s\n' 'PORT=8780'
   } >/etc/kiosk-webui.env
@@ -475,13 +662,31 @@ User=kiosk
 Group=kiosk
 EnvironmentFile=/etc/kiosk-webui.env
 Environment=KIOSK_USER=kiosk
-ExecStart=/usr/bin/python3 /opt/kiosk-webui/kiosk-webui.py
+ExecStart=/usr/bin/kiosk-webui
 Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target graphical.target
 WEBUISVC
+
+  cat >/usr/share/applications/kiosk-display-config.desktop <<'DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Kiosk display config
+Comment=Open the kiosk URL and monitor settings page in your web browser
+Exec=sh -c 'xdg-open "http://127.0.0.1:8780/"'
+Icon=preferences-desktop-display
+Categories=Settings;HardwareSettings;
+Keywords=display;kiosk;URL;monitor;
+Terminal=false
+StartupNotify=true
+DESKTOP
+  chmod 644 /usr/share/applications/kiosk-display-config.desktop
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+  fi
 
   systemctl daemon-reload
   # Enable for both targets so the UI starts on every boot (SSH / text or full GUI).
@@ -490,15 +695,17 @@ WEBUISVC
 
   umask 077
   {
-    printf '%s\n' "Kiosk web UI token (also in /etc/kiosk-webui.env):"
-    printf '%s\n' "$WEBUI_TOKEN"
-    printf '%s\n' "Open: http://THIS_HOST:8780/?token=PASTE_TOKEN"
-    printf '%s\n' "Or: curl -H \"X-Kiosk-Token: $WEBUI_TOKEN\" http://127.0.0.1:8780/api/xrandr.json"
-  } >/root/kiosk-webui-token.txt
+    printf '%s\n' "Kiosk web UI (no token in URL):"
+    printf '%s\n' "  Command: kiosk-webui   (same as: python3 /usr/lib/kiosk-webui/kiosk-webui.py)"
+    printf '%s\n' "  Browser: http://127.0.0.1:8780/  or from menus: “Kiosk display config”"
+    printf '%s\n' "  curl:    curl -sS http://127.0.0.1:8780/api/xrandr.json"
+    printf '%s\n' "Anyone on the network can change URLs if BIND=0.0.0.0. Use BIND=127.0.0.1 + SSH tunnel for a closed kiosk."
+  } >/root/kiosk-webui.txt
   umask 022
-  chmod 600 /root/kiosk-webui-token.txt
+  chmod 600 /root/kiosk-webui.txt
 else
-  echo "Note: kiosk-webui.py not found beside $0 — skipped web UI install." >&2
+  echo "Note: kiosk-webui.py could not be resolved (place it in ${SCRIPT_DIR}, set KIOSK_WEBUI_SRC=, or allow GitHub download)." >&2
+  echo "  Offline: copy kiosk-webui.py next to this script and re-run, or: KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py sudo $0" >&2
 fi
 
 echo
@@ -507,11 +714,11 @@ echo "Greeter fallback password for user '${KIOSK_USER}' (if autologin fails):"
 echo "  sudo cat /root/kiosk-greeter-password.txt"
 echo "Or from a text console: Ctrl+Alt+F3, login as root, then: cat /root/kiosk-greeter-password.txt"
 echo "LightDM X session: ${XSESSION_ID}"
-echo "URLs: one file per display — ${KIOSK_HOME}/.config/kiosk-urls/01.txt … 99.txt"
-echo "  (line1=URL, line2=rotation: normal|left|right|inverted). Fewer files than displays repeats the last URL."
-echo "Displays: OUTPUT_LIST=auto uses all connected outputs in xrandr order; or comma-separated names."
-echo "Edit ${KIOSK_HOME}/.config/kiosk.env or use the web UI (see /root/kiosk-webui-token.txt)."
-if [[ -f /opt/kiosk-webui/kiosk-webui.py ]]; then
-  echo "Web UI (display + URLs): http://<host>:8780/?token=...  — token: sudo cat /root/kiosk-webui-token.txt"
+echo "Config: ${KIOSK_HOME}/.config/kiosk.json (output_list, mode, chrome_bin, screen sizes, displays[].url / rotation)."
+echo "  Fewer URLs than monitors repeats the last URL. Rotations: normal|left|right|inverted."
+echo "Displays: output_list=auto uses all connected outputs in xrandr order; or comma-separated names."
+echo "Edit ${KIOSK_HOME}/.config/kiosk.json or use the web UI (see /root/kiosk-webui.txt)."
+if [[ -f /usr/lib/kiosk-webui/kiosk-webui.py ]]; then
+  echo "Web UI (display + URLs): http://<host>:8780/  — app menu: Kiosk display config — notes: sudo cat /root/kiosk-webui.txt"
 fi
 echo

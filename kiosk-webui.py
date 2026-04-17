@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
 Minimal kiosk display / URL config web UI (Python 3 stdlib only).
-Config: /etc/kiosk-webui.env (TOKEN=..., BIND=0.0.0.0, PORT=8780)
-Supports multiple displays via kiosk-urls/01.txt … and OUTPUT_LIST in kiosk.env.
+Server config: /etc/kiosk-webui.env (BIND=0.0.0.0, PORT=8780)
+Kiosk config: ~/.config/kiosk.json (output_list, mode, displays[].url / rotation, …)
 """
 from __future__ import annotations
 
-import glob
 import html
 import json
 import os
 import pwd
 import re
-import shlex
 import subprocess
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-MAX_SLOTS = 16
+MAX_SLOTS = 24
+ROT_OK = frozenset({"normal", "left", "right", "inverted"})
 
 
 def _conf() -> dict[str, str]:
@@ -36,80 +35,98 @@ def _conf() -> dict[str, str]:
     return out
 
 
-def _kiosk_paths() -> tuple[str, str, str, str]:
+def _kiosk_paths() -> tuple[str, str, str]:
     user = os.environ.get("KIOSK_USER", "kiosk")
     home = f"/home/{user}"
-    return (
-        user,
-        home,
-        f"{home}/.config/kiosk.env",
-        f"{home}/.config/kiosk-urls",
-    )
+    return user, home, f"{home}/.config/kiosk.json"
 
 
-def _read_text(path: str, default: str = "") -> str:
+def _load_kiosk_raw(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return default
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
-def _parse_env(content: str) -> dict[str, str]:
-    d: dict[str, str] = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if len(v) >= 2 and ((v[0] == v[-1] == "'") or (v[0] == v[-1] == '"')):
-            v = v[1:-1]
-        d[k] = v
-    return d
+def _default_kiosk() -> dict:
+    return {
+        "output_list": "auto",
+        "mode": "auto",
+        "screen_width": "1024",
+        "screen_height": "768",
+        "chrome_bin": "/usr/bin/google-chrome-stable",
+        "displays": [
+            {"url": "http://127.0.0.1:9877", "rotation": "normal"},
+            {"url": "http://127.0.0.1:9876", "rotation": "normal"},
+        ],
+    }
 
 
-def _write_env(path: str, keys: dict[str, str], url_dir: str) -> None:
-    lines = [
-        "# Managed by kiosk-webui.",
-        f"KIOSK_URL_DIR={shlex.quote(url_dir)}",
-        f"OUTPUT_LIST={shlex.quote(keys.get('OUTPUT_LIST', 'auto'))}",
-        f"MODE={shlex.quote(keys.get('MODE', 'auto'))}",
-        f"SCREEN_WIDTH={shlex.quote(keys.get('SCREEN_WIDTH', '1024'))}",
-        f"SCREEN_HEIGHT={shlex.quote(keys.get('SCREEN_HEIGHT', '768'))}",
-        f"CHROME_BIN={shlex.quote(keys.get('CHROME_BIN', '/usr/bin/google-chrome-stable'))}",
-        "",
-    ]
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    os.replace(tmp, path)
+def _canonical_keys(raw: dict) -> dict:
+    """Accept legacy UPPER_SNAKE keys from older hand-edited JSON."""
+    out = dict(raw)
+    upl = {
+        "OUTPUT_LIST": "output_list",
+        "MODE": "mode",
+        "SCREEN_WIDTH": "screen_width",
+        "SCREEN_HEIGHT": "screen_height",
+        "CHROME_BIN": "chrome_bin",
+    }
+    for a, b in upl.items():
+        if a in out and b not in out:
+            out[b] = out.pop(a)
+    return out
 
 
-def _write_url_file(path: str, url: str, rotation: str) -> None:
-    url = (url or "").strip()
-    rotation = (rotation or "normal").strip().lower() or "normal"
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        f.write(url + "\n" + rotation + "\n")
-    os.replace(tmp, path)
+def _merge_kiosk(raw: dict) -> dict:
+    raw = _canonical_keys(raw)
+    base = _default_kiosk()
+    for k, v in raw.items():
+        if k != "displays":
+            base[k] = v
+    disp = raw.get("displays")
+    if isinstance(disp, list) and disp:
+        base["displays"] = disp
+    return base
 
 
-def _load_slots(dir_urls: str) -> list[tuple[str, str, str]]:
-    """Return (slot, url, rot) for 01..MAX_SLOTS, reading files when present."""
+def _form_env_map(data: dict) -> dict[str, str]:
+    """Keys matching HTML form / legacy UPPER names for labels."""
+    return {
+        "OUTPUT_LIST": str(data.get("output_list", "auto")),
+        "MODE": str(data.get("mode", "auto")),
+        "SCREEN_WIDTH": str(data.get("screen_width", "1024")),
+        "SCREEN_HEIGHT": str(data.get("screen_height", "768")),
+        "CHROME_BIN": str(data.get("chrome_bin", "/usr/bin/google-chrome-stable")),
+    }
+
+
+def _load_slots(data: dict) -> list[tuple[str, str, str]]:
+    """(slot, url, rot) for 01..MAX_SLOTS from displays array."""
+    disp = data.get("displays")
+    if not isinstance(disp, list):
+        disp = []
     rows: list[tuple[str, str, str]] = []
     for i in range(1, MAX_SLOTS + 1):
         slot = f"{i:02d}"
-        p = os.path.join(dir_urls, f"{slot}.txt")
-        txt = _read_text(p) if os.path.isfile(p) else ""
-        lines = [ln.rstrip("\r") for ln in txt.splitlines() if ln.strip() != ""]
-        u = lines[0] if lines else ""
-        r = lines[1] if len(lines) > 1 else "normal"
-        if r not in ("normal", "left", "right", "inverted"):
-            r = "normal"
+        u, r = "", "normal"
+        if i - 1 < len(disp) and isinstance(disp[i - 1], dict):
+            u = str(disp[i - 1].get("url", "")).strip()
+            r = str(disp[i - 1].get("rotation", "normal")).strip().lower() or "normal"
+            if r not in ROT_OK:
+                r = "normal"
         rows.append((slot, u, r))
     return rows
+
+
+def _write_kiosk(path: str, data: dict) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def _xrandr_json(user: str, home: str) -> str:
@@ -137,17 +154,33 @@ def _xrandr_json(user: str, home: str) -> str:
     return json.dumps({"ok": True, "outputs": outputs})
 
 
-def _token_from_request(handler: BaseHTTPRequestHandler, form_token: str | None) -> str:
-    h = handler.headers.get("X-Kiosk-Token", "")
-    if h:
-        return h
-    q = urllib.parse.urlparse(handler.path).query
-    qtok = urllib.parse.parse_qs(q).get("token", [""])[0]
-    if qtok:
-        return qtok
-    if form_token:
-        return form_token
-    return ""
+def _connected_output_names(user: str, home: str) -> list[str]:
+    raw = _xrandr_json(user, home)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not data.get("ok"):
+        return []
+    return [str(o["name"]) for o in data.get("outputs", [])]
+
+
+def _display_row_labels(env_map: dict[str, str], user: str, home: str) -> list[str]:
+    ol = (env_map.get("OUTPUT_LIST") or "auto").strip().lower()
+    if ol in ("", "auto", "detect", "any"):
+        names = _connected_output_names(user, home)
+    else:
+        names = [x.strip() for x in (env_map.get("OUTPUT_LIST") or "").split(",") if x.strip()]
+    out: list[str] = []
+    for i in range(MAX_SLOTS):
+        idx = i + 1
+        if i < len(names):
+            out.append(f"Display {idx} — {names[i]}")
+        elif not names:
+            out.append(f"Display {idx} (set output_list=auto or run under X to detect outputs)")
+        else:
+            out.append(f"Display {idx} (beyond {len(names)} head(s); URL repeats last monitor on host)")
+    return out
 
 
 PAGE_CSS = """
@@ -158,8 +191,9 @@ label { display:block; margin-top:.5rem; font-size:.8rem; color:#9ca3af; }
 input, select { width:100%; padding:.4rem .5rem; border-radius:.35rem; border:1px solid #374151; background:#1f2937; color:#e5e7eb; }
 button { margin-top:1rem; padding:.55rem 1rem; border-radius:.35rem; border:0; background:#2563eb; color:#fff; cursor:pointer; }
 a { color:#93c5fd; }
-.grid { display:grid; grid-template-columns: 4rem 1fr 9rem; gap:.5rem .75rem; align-items:end; }
+.grid { display:grid; grid-template-columns: minmax(10rem,1.1fr) 3rem 1fr 9rem; gap:.5rem .75rem; align-items:end; }
 .hdr { font-weight:600; color:#9ca3af; font-size:.75rem; margin-bottom:.25rem; }
+.slot { font-family: ui-monospace, monospace; color:#d1d5db; padding:.35rem 0; }
 @media (max-width:700px){ .grid { grid-template-columns:1fr; } }
 """
 
@@ -174,32 +208,38 @@ def _sel(name: str, current: str) -> str:
 
 
 def _form_page(
-    env: dict[str, str],
+    env_map: dict[str, str],
     slots: list[tuple[str, str, str]],
+    row_labels: list[str],
     msg: str,
-    token_value: str,
 ) -> bytes:
     def g(key: str, default: str = "") -> str:
-        return html.escape(env.get(key, default))
+        return html.escape(env_map.get(key, default))
 
-    rows_html = ['<div class="grid hdr"><div>#</div><div>URL</div><div>Rotation</div></div>']
-    for slot, u, r in slots:
+    rows_html = [
+        '<div class="grid hdr"><div>Monitor</div><div>Slot</div><div>URL for this display</div><div>Rotation</div></div>'
+    ]
+    for j, (slot, u, r) in enumerate(slots):
+        lab = row_labels[j] if j < len(row_labels) else f"Display {j + 1}"
         rows_html.append(
-            f'<div class="grid"><div style="padding:.4rem 0">{html.escape(slot)}</div>'
-            f'<div><input name="URL_{slot}" value="{html.escape(u)}" placeholder="empty = remove file" autocomplete="off"/></div>'
-            f'<div>{_sel(f"ROT_{slot}", r)}</div></div>'
+            f'<div class="grid">'
+            f'<div style="font-size:.82rem;line-height:1.25">{html.escape(lab)}</div>'
+            f'<div class="slot">{html.escape(slot)}</div>'
+            f'<div><input name="URL_{slot}" type="text" inputmode="url" value="{html.escape(u)}" '
+            f'placeholder="https://…" title="URL shown fullscreen on this monitor" autocomplete="off"/></div>'
+            f'<div>{_sel(f"ROT_{slot}", r)}</div>'
+            f"</div>"
         )
 
     msg_html = f'<p style="color:#86efac">{html.escape(msg)}</p>' if msg else ""
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Kiosk display config</title><style>{PAGE_CSS}</style></head><body>
-<h1>Kiosk — multi-display</h1>
-<p><code>OUTPUT_LIST</code>: comma-separated xrandr names, or <code>auto</code> for <strong>all connected</strong> outputs in order. One URL file per display: <code>01.txt</code> … <code>{MAX_SLOTS:02d}.txt</code> (line1=URL, line2=rotation).</p>
-<p>Auth: header <code>X-Kiosk-Token</code> or <code>?token=…</code> (see <code>/etc/kiosk-webui.env</code>).</p>
+<h1>Kiosk — URLs per display</h1>
+<p>All settings are saved to <code>kiosk.json</code> on this machine. <strong>Each row</strong> is one physical monitor (slot <code>01</code> = first in <code>OUTPUT_LIST</code>). Empty URL clears that slot (trailing empty slots are dropped on save).</p>
+<p><code>OUTPUT_LIST</code>: comma-separated <code>xrandr</code> names, or <code>auto</code> for all connected heads. Up to <strong>{MAX_SLOTS}</strong> rows below.</p>
 {msg_html}
 <form method="post" action="/save">
-  <input type="hidden" name="token" value="{html.escape(token_value)}"/>
   <label>OUTPUT_LIST</label>
   <input name="OUTPUT_LIST" value="{g('OUTPUT_LIST', 'auto')}" autocomplete="off"/>
   <div class="grid" style="margin-top:1rem">
@@ -212,11 +252,11 @@ def _form_page(
     <div><label>SCREEN_HEIGHT</label><input name="SCREEN_HEIGHT" value="{g('SCREEN_HEIGHT', '768')}" autocomplete="off"/></div>
     <div></div>
   </div>
-  <h2 style="margin-top:1.5rem;font-size:1rem">URLs per display</h2>
+  <h2 style="margin-top:1.5rem;font-size:1.05rem">Set URL (and rotation) for each display</h2>
   {''.join(rows_html)}
-  <button type="submit">Save</button>
+  <button type="submit">Save to kiosk.json</button>
 </form>
-<p><a href="/api/xrandr.json?token={html.escape(urllib.parse.quote(token_value, safe=''))}">Connected outputs (JSON)</a></p>
+<p><a href="/api/xrandr.json">Connected outputs (JSON)</a></p>
 </body></html>"""
     return body.encode("utf-8")
 
@@ -227,24 +267,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
 
-    def _need_auth(self, conf: dict[str, str], form_token: str | None = None) -> bool:
-        want = conf.get("TOKEN", "")
-        if not want:
-            return False
-        return _token_from_request(self, form_token) == want
-
     def do_GET(self) -> None:  # noqa: N802
-        conf = _conf()
-        tok = conf.get("TOKEN", "")
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
-        user, home, path_env, dir_urls = _kiosk_paths()
+        user, home, path_json = _kiosk_paths()
 
         if path == "/api/xrandr.json":
-            if not self._need_auth(conf):
-                self.send_response(401)
-                self.end_headers()
-                return
             data = _xrandr_json(user, home).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -258,20 +286,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        if not tok or not self._need_auth(conf):
-            self.send_response(401)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            msg = "<p>Unauthorized. Open with <code>?token=YOUR_TOKEN</code> (see <code>/etc/kiosk-webui.env</code>).</p>"
-            self.wfile.write(msg.encode())
-            return
-
         q = urllib.parse.parse_qs(parsed.query)
         msg = "Saved." if q.get("ok", [""])[0] == "1" else ""
-        env_map = _parse_env(_read_text(path_env))
-        slots = _load_slots(dir_urls)
-        token_q = q.get("token", [tok])[0]
-        page = _form_page(env_map, slots, msg, token_q)
+        merged = _merge_kiosk(_load_kiosk_raw(path_json)) if os.path.isfile(path_json) else _default_kiosk()
+        env_map = _form_env_map(merged)
+        slots = _load_slots(merged)
+        labels = _display_row_labels(env_map, user, home)
+        page = _form_page(env_map, slots, labels, msg)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -279,8 +300,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(page)
 
     def do_POST(self) -> None:  # noqa: N802
-        conf = _conf()
-        tok = conf.get("TOKEN", "")
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path != "/save":
             self.send_response(404)
@@ -293,60 +312,49 @@ class Handler(BaseHTTPRequestHandler):
         def one(name: str) -> str:
             return (form.get(name, [""])[0] or "").strip()
 
-        form_tok = one("token")
-        if not tok or not self._need_auth(conf, form_tok):
-            self.send_response(401)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"Unauthorized\n")
-            return
+        user, home, path_json = _kiosk_paths()
+        os.makedirs(os.path.dirname(path_json), mode=0o700, exist_ok=True)
 
-        user, home, path_env, dir_urls = _kiosk_paths()
-        os.makedirs(dir_urls, mode=0o700, exist_ok=True)
-
-        keys = {
-            "OUTPUT_LIST": one("OUTPUT_LIST") or "auto",
-            "MODE": one("MODE") or "auto",
-            "SCREEN_WIDTH": re.sub(r"[^0-9]", "", one("SCREEN_WIDTH")) or "1024",
-            "SCREEN_HEIGHT": re.sub(r"[^0-9]", "", one("SCREEN_HEIGHT")) or "768",
-            "CHROME_BIN": one("CHROME_BIN") or "/usr/bin/google-chrome-stable",
-        }
-        _write_env(path_env, keys, dir_urls)
-
+        prev = _merge_kiosk(_load_kiosk_raw(path_json)) if os.path.isfile(path_json) else _default_kiosk()
+        displays: list[dict[str, str]] = []
         for i in range(1, MAX_SLOTS + 1):
             slot = f"{i:02d}"
             u = one(f"URL_{slot}")
             r = one(f"ROT_{slot}") or "normal"
-            path = os.path.join(dir_urls, f"{slot}.txt")
-            if u:
-                _write_url_file(path, u, r)
-            elif os.path.isfile(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            if r not in ROT_OK:
+                r = "normal"
+            displays.append({"url": u, "rotation": r})
+        while displays and not displays[-1]["url"].strip():
+            displays.pop()
+
+        out = {
+            "output_list": one("OUTPUT_LIST") or "auto",
+            "mode": one("MODE") or "auto",
+            "screen_width": re.sub(r"[^0-9]", "", one("SCREEN_WIDTH")) or "1024",
+            "screen_height": re.sub(r"[^0-9]", "", one("SCREEN_HEIGHT")) or "768",
+            "chrome_bin": one("CHROME_BIN") or "/usr/bin/google-chrome-stable",
+            "displays": displays,
+        }
+        for k in list(prev.keys()):
+            if k not in out and k not in ("output_list", "mode", "screen_width", "screen_height", "chrome_bin", "displays"):
+                out[k] = prev[k]
+
+        _write_kiosk(path_json, out)
 
         try:
             pw = pwd.getpwnam(user)
-            os.chown(path_env, pw.pw_uid, pw.pw_gid)
-            os.chmod(path_env, 0o600)
-            for p in glob.glob(os.path.join(dir_urls, "[0-9][0-9].txt")):
-                os.chown(p, pw.pw_uid, pw.pw_gid)
-                os.chmod(p, 0o600)
+            os.chown(path_json, pw.pw_uid, pw.pw_gid)
+            os.chmod(path_json, 0o600)
         except OSError:
             pass
 
         self.send_response(303)
-        self.send_header("Location", "/?ok=1&token=" + urllib.parse.quote(tok, safe=""))
+        self.send_header("Location", "/?ok=1")
         self.end_headers()
 
 
 def run() -> None:
     conf = _conf()
-    token = conf.get("TOKEN", "")
-    if not token:
-        print("Missing TOKEN in /etc/kiosk-webui.env", file=sys.stderr)
-        sys.exit(1)
     host = conf.get("BIND", "127.0.0.1")
     port = int(conf.get("PORT", "8780"))
     httpd = HTTPServer((host, port), Handler)

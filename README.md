@@ -9,7 +9,7 @@ Repository: [github.com/binarygeek119/ubuntudisplayos](https://github.com/binary
 ## Requirements
 
 - Ubuntu 24.04 (or similar) with root/sudo
-- At least **one** physical display; **one Chrome window per connected output** when `OUTPUT_LIST=auto`
+- At least **one** physical display; **one Chrome window per connected output** when `output_list` is `auto`
 - Network access to install Google Chrome (or Chromium fallback)
 
 ## Quick install
@@ -19,43 +19,62 @@ On the Ubuntu machine:
 ```bash
 git clone https://github.com/binarygeek119/ubuntudisplayos.git
 cd ubuntudisplayos
-sed -i 's/\r$//' setup-dual-kiosk.sh kiosk-webui.py   # if you copied from Windows
-chmod +x setup-dual-kiosk.sh
-sudo ./setup-dual-kiosk.sh
+sed -i 's/\r$//' install-kiosk.sh kiosk-webui.py   # if you copied from Windows
+chmod +x install-kiosk.sh
+sudo ./install-kiosk.sh
 sudo reboot
 ```
 
-Place **`kiosk-webui.py` in the same directory** as `setup-dual-kiosk.sh` when you run the installer so the optional web UI is installed to `/opt/kiosk-webui/`.
+The **web UI** is installed to **`/usr/lib/kiosk-webui/kiosk-webui.py`** (plus **`/usr/bin/kiosk-webui`**, **`kiosk-webui.service`**, and the **“Kiosk display config”** menu entry) when **`install-kiosk.sh`** can find **`kiosk-webui.py`**: same folder as the script, **`KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py`**, or—if the machine has network—by **downloading** from GitHub (`main` branch) unless **`KIOSK_WEBUI_SKIP_DOWNLOAD=1`**. Override the URL with **`KIOSK_WEBUI_URL=…`** if needed.
 
 ## Configuration
 
-### URLs and rotation (per screen)
+### `kiosk.json` (single config file)
 
-Under `/home/kiosk/.config/kiosk-urls/` use **numbered** files, one per display in order:
+Everything the kiosk session and web UI need lives in **`/home/kiosk/.config/kiosk.json`** (JSON). There are no per-display `*.txt` files and no separate `kiosk.env`.
 
-| File | Purpose |
-|------|---------|
-| `01.txt` | Display 1 — line 1: URL · line 2: rotation |
-| `02.txt` | Display 2 — same |
-| `03.txt` … `99.txt` | Additional displays |
+| Field | Purpose |
+|--------|---------|
+| **`output_list`** | Comma-separated `xrandr` output names, or **`auto`** for all connected heads in probe order, laid out left-to-right with `--right-of`. |
+| **`mode`** | `auto` / `default` per panel, or one fixed mode for every head (e.g. `1920x1080`). |
+| **`screen_width`** / **`screen_height`** | Fallback when geometry cannot be read from `xrandr`. |
+| **`chrome_bin`** | Path to Chrome or Chromium. |
+| **`displays`** | Array of objects **`{ "url": "…", "rotation": "normal" }`**, in order: index **0** = first / leftmost monitor, then **1**, … up to **24** slots in the web form. |
 
-Rotation values: `normal`, `left`, `right`, `inverted`.
+**`rotation`** values: `normal`, `left`, `right`, `inverted`.
 
-If you have **more monitors than URL files**, the last defined URL is **repeated** for the extra heads. If you have **fewer monitors than files**, extra files are ignored for layout (only the first *N* slots are used, where *N* = number of outputs in use).
+If you have **more monitors than non-empty URLs** in `displays`, the **last** defined URL (and its rotation) is **repeated** for the extra heads. If you have **fewer monitors than entries**, extra `displays` entries are ignored for layout (only the first *N* are used, where *N* = number of outputs in use).
 
-Changes are picked up within a few seconds (watcher reloads Chrome). Editing `kiosk.env` also triggers a reload (mtime is watched).
+Changes are picked up within a few seconds (watcher reloads Chrome). Editing **`kiosk.json`** also triggers a reload (file mtime is watched).
 
-### Display / Chrome (`kiosk.env`)
+Example (abbreviated):
 
-`/home/kiosk/.config/kiosk.env` — key settings:
+```json
+{
+  "output_list": "auto",
+  "mode": "auto",
+  "screen_width": "1024",
+  "screen_height": "768",
+  "chrome_bin": "/usr/bin/google-chrome-stable",
+  "displays": [
+    { "url": "https://example.com/", "rotation": "normal" },
+    { "url": "https://example.org/", "rotation": "normal" }
+  ]
+}
+```
 
-- **`OUTPUT_LIST`**: `auto` = use **all connected** outputs in `xrandr` probe order, laid out left-to-right with `--right-of`. Or set a comma-separated list of exact output names (each must be connected), e.g. `HDMI-0,VGA-0,DP-1`.
-- **`KIOSK_URL_DIR`**: directory containing `01.txt`, `02.txt`, … (set by installer; web UI keeps it in sync).
-- **`MODE`**: `auto` (preferred per panel) or one fixed mode for every head (e.g. `1920x1080`).
-- **`SCREEN_WIDTH` / `SCREEN_HEIGHT`**: fallback when geometry cannot be read from `xrandr`.
-- **`CHROME_BIN`**: path to Chrome or Chromium.
+On first install, **`install-kiosk.sh`** creates **`kiosk.json`** if it is missing. If you upgrade from an older layout, the installer **migrates** from **`kiosk.env`** and **`kiosk-urls/NN.txt`** (and legacy **`kiosk-url/display.txt`**) into **`kiosk.json`** once.
 
-Legacy installs that still have **`OUTPUT_LEFT`** / **`OUTPUT_RIGHT`** in `kiosk.env` are mapped to **`OUTPUT_LIST=left,right`** at session start.
+### Displays on 24/7 (no sleep, no X blanking)
+
+The installer aims to keep panels awake around the clock:
+
+- **systemd-logind** (`/etc/systemd/logind.conf.d/99-kiosk-no-sleep.conf`): lid and idle sleep ignored; **`sleep.target` / `suspend.target` / `hibernate.target` / `hybrid-sleep.target`** are masked.
+- **Xorg** (`/etc/X11/xorg.conf.d/10-kiosk-no-blanking.conf`): server blank/standby/suspend/off timers set to **0** (the default X blank interval is often ~10 minutes otherwise).
+- **Openbox session** (`kiosk` autostart): **`xset`** turns off the screensaver, **DPMS**, and “noblank”; the URL watcher **re-applies** those settings about every minute in case a driver or browser toggles them back.
+- **Kernel** (`/etc/default/grub.d/zz-kiosk-consoleblank.cfg`): **`consoleblank=0`** on the kernel command line (after `update-grub` + reboot) so text virtual consoles do not blank independently of X.
+
+If a **TV or monitor** still powers down, check its own **ECO / power timer / HDMI CEC** menus; that behavior is outside the PC.
 
 Over SSH, list outputs:
 
@@ -75,33 +94,44 @@ sudo cat /root/kiosk-greeter-password.txt
 
 After install (with `kiosk-webui.py` present):
 
+- **Program:** `/usr/lib/kiosk-webui/kiosk-webui.py` · **CLI:** `kiosk-webui` (symlink) · **Config:** `/etc/kiosk-webui.env`
+- **Desktop:** “Kiosk display config” in the system application menu (uses `xdg-open` to `http://127.0.0.1:8780/`).
 - Service: `kiosk-webui.service` (runs as user `kiosk`), **enabled on boot** via `multi-user.target` and `graphical.target` (starts even before the GUI session is up).
-- Default listen: **`0.0.0.0:8780`**
-- Token: `/etc/kiosk-webui.env` (`TOKEN=...`) and copy in `/root/kiosk-webui-token.txt`
+- Default listen: **`0.0.0.0:8780`** — **no token**; host and port come from **`BIND`** and **`PORT`** in `/etc/kiosk-webui.env` (defaults shown here).
 
-Open in a browser:
+### Web URLs (config UI)
 
-```text
-http://<host-ip>:8780/?token=<YOUR_TOKEN>
-```
+Use plain **HTTP** (not HTTPS). Replace **`<host>`** with the kiosk’s IP or hostname, and **`<port>`** with `PORT` (default **8780**).
 
-The form edits **`OUTPUT_LIST`**, global video settings, and up to **16** URL/rotation rows (`01`–`16`). Saving an empty URL for a slot **removes** that `NN.txt` file.
+| What | URL |
+|------|-----|
+| **Settings form** (same machine) | `http://127.0.0.1:8780/` |
+| **Settings form** (another PC on the LAN) | `http://<host>:8780/` |
+| **After save** (redirect) | `http://<host>:8780/?ok=1` |
+| **Connected outputs (JSON)** | `http://<host>:8780/api/xrandr.json` |
+| **Save** (browser only) | `POST` to `http://<host>:8780/save` (use the form; no separate login page) |
 
-API example:
+- **`BIND=0.0.0.0`** (default): listen on **all interfaces** — use the kiosk’s LAN address from another device, or `127.0.0.1` on the kiosk itself.
+- **`BIND=127.0.0.1`**: only **this machine** can open the URLs above; use SSH port forwarding to reach it remotely.
+
+The form edits **`output_list`**, global video settings, and up to **24** URL/rotation rows. Each row is labeled for the matching monitor (from `output_list` or live `xrandr` when `output_list` is `auto`). Saving writes **`/home/kiosk/.config/kiosk.json`**; trailing rows with an empty URL are dropped.
+
+**API example** (on the kiosk):
 
 ```bash
-curl -H "X-Kiosk-Token: YOUR_TOKEN" http://127.0.0.1:8780/api/xrandr.json
+curl -sS http://127.0.0.1:8780/api/xrandr.json
 ```
 
-**Security:** anyone who has the token can change kiosk URLs and display settings. For LAN-only exposure, set `BIND=127.0.0.1` in `/etc/kiosk-webui.env` and use SSH port forwarding.
+**Security:** there is **no authentication** on the web UI. Anyone who can reach the port can change kiosk URLs and display settings. For a closed network or single-machine use, set **`BIND=127.0.0.1`** in `/etc/kiosk-webui.env` and use SSH port forwarding if you need remote access. After editing the env file: `sudo systemctl restart kiosk-webui`.
 
 ## Repository layout
 
 | File | Description |
 |------|-------------|
-| `setup-dual-kiosk.sh` | Main installer: LightDM, Openbox, Chrome, multi-head `xrandr`, autologin, sleep disable, web UI unit |
-| `kiosk-webui.py` | Minimal Python 3 stdlib config UI (up to 16 URL slots) |
-| `01.txt` / `02.txt` | Example URL+rotation lines for the first two displays |
+| `install-kiosk.sh` | Main installer: LightDM, Openbox, Chrome, multi-head `xrandr`, autologin, sleep + X blanking off, web UI unit |
+| `kiosk-webui.py` | Minimal Python 3 stdlib config UI (edits `kiosk.json`, up to 24 display slots, per-display labels) |
+
+On the installed machine, **`kiosk.json`** lives under **`/home/kiosk/.config/`** and is not committed in this repo.
 
 `.gitattributes` forces **LF** line endings for `*.sh`, `*.py`, and `*.txt` so scripts run correctly on Linux.
 
