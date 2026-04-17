@@ -4,6 +4,8 @@ Turn **Ubuntu Server/Desktop 24.04** into a **dual-display web kiosk**: two full
 
 Repository: [github.com/binarygeek119/ubuntudisplayos](https://github.com/binarygeek119/ubuntudisplayos)
 
+**Sister project:** Ubuntu Display OS is meant to run alongside **[posterr](https://github.com/binarygeek119/posterr)** — this repo handles the dual-screen kiosk host (Chrome, LightDM, layout), while **[binarygeek119/posterr](https://github.com/binarygeek119/posterr)** (a fork of the original posterr) can serve or coordinate the poster-style content you show on those displays.
+
 ## Requirements
 
 - Ubuntu 24.04 (or similar) with root/sudo
