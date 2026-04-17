@@ -129,6 +129,15 @@ def _write_kiosk(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _trigger_kiosk_reload() -> None:
+    """Best-effort: terminate browser windows so the watcher relaunches with fresh config."""
+    for pat in ("google-chrome", "chromium", "chromium-browser"):
+        try:
+            subprocess.run(["pkill", "-f", pat], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+
+
 def _xrandr_json(user: str, home: str) -> str:
     env = os.environ.copy()
     env["DISPLAY"] = ":0"
@@ -226,7 +235,7 @@ def _form_page(
             f'<div style="font-size:.82rem;line-height:1.25">{html.escape(lab)}</div>'
             f'<div class="slot">{html.escape(slot)}</div>'
             f'<div><input name="URL_{slot}" type="text" inputmode="url" value="{html.escape(u)}" '
-            f'placeholder="https://…" title="URL shown fullscreen on this monitor" autocomplete="off"/></div>'
+            f'placeholder="https://…" title="This URL opens in the Chrome window for this monitor" autocomplete="off"/></div>'
             f'<div>{_sel(f"ROT_{slot}", r)}</div>'
             f"</div>"
         )
@@ -236,7 +245,7 @@ def _form_page(
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Kiosk display config</title><style>{PAGE_CSS}</style></head><body>
 <h1>Kiosk — URLs per display</h1>
-<p>All settings are saved to <code>kiosk.json</code> on this machine. <strong>Each row</strong> is one physical monitor (slot <code>01</code> = first in <code>OUTPUT_LIST</code>). Empty URL clears that slot (trailing empty slots are dropped on save).</p>
+<p>All settings are saved to <code>kiosk.json</code> on this machine. <strong>Each row</strong> maps to one physical monitor (slot <code>01</code> = first in <code>OUTPUT_LIST</code>). The row URL opens in that monitor's fullscreen Chrome window. Empty URL clears that slot (trailing empty slots are dropped on save).</p>
 <p><code>OUTPUT_LIST</code>: comma-separated <code>xrandr</code> names, or <code>auto</code> for all connected heads. Up to <strong>{MAX_SLOTS}</strong> rows below.</p>
 {msg_html}
 <form method="post" action="/save">
@@ -340,6 +349,7 @@ class Handler(BaseHTTPRequestHandler):
                 out[k] = prev[k]
 
         _write_kiosk(path_json, out)
+        _trigger_kiosk_reload()
 
         try:
             pw = pwd.getpwnam(user)

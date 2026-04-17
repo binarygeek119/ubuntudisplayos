@@ -25,6 +25,8 @@ sudo ./install-kiosk.sh
 sudo reboot
 ```
 
+The installer runs **`apt-get update`** then a noninteractive **`apt-get upgrade`** (updates installed packages without **`full-upgrade`** / **`dist-upgrade`**). To skip that step (faster reruns or air‑gapped hosts): **`KIOSK_SKIP_SYSTEM_UPGRADE=1 sudo ./install-kiosk.sh`**.
+
 The **web UI** is installed to **`/usr/lib/kiosk-webui/kiosk-webui.py`** (plus **`/usr/bin/kiosk-webui`**, **`kiosk-webui.service`**, and the **“Kiosk display config”** menu entry) when **`install-kiosk.sh`** can find **`kiosk-webui.py`**: same folder as the script, **`KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py`**, or—if the machine has network—by **downloading** from GitHub (`main` branch) unless **`KIOSK_WEBUI_SKIP_DOWNLOAD=1`**. Override the URL with **`KIOSK_WEBUI_URL=…`** if needed.
 
 ## Configuration
@@ -45,7 +47,7 @@ Everything the kiosk session and web UI need lives in **`/home/kiosk/.config/kio
 
 If you have **more monitors than non-empty URLs** in `displays`, the **last** defined URL (and its rotation) is **repeated** for the extra heads. If you have **fewer monitors than entries**, extra `displays` entries are ignored for layout (only the first *N* are used, where *N* = number of outputs in use).
 
-Changes are picked up within a few seconds (watcher reloads Chrome). Editing **`kiosk.json`** also triggers a reload (file mtime is watched).
+Changes are applied immediately when you click **Save** in the web UI (it writes `kiosk.json` and triggers a browser relaunch). Direct edits to **`kiosk.json`** are also picked up by the watcher within a few seconds.
 
 Example (abbreviated):
 
@@ -114,7 +116,7 @@ Use plain **HTTP** (not HTTPS). Replace **`<host>`** with the kiosk’s IP or ho
 - **`BIND=0.0.0.0`** (default): listen on **all interfaces** — use the kiosk’s LAN address from another device, or `127.0.0.1` on the kiosk itself.
 - **`BIND=127.0.0.1`**: only **this machine** can open the URLs above; use SSH port forwarding to reach it remotely.
 
-The form edits **`output_list`**, global video settings, and up to **24** URL/rotation rows. Each row is labeled for the matching monitor (from `output_list` or live `xrandr` when `output_list` is `auto`). Saving writes **`/home/kiosk/.config/kiosk.json`**; trailing rows with an empty URL are dropped.
+The form edits **`output_list`**, global video settings, and up to **24** URL/rotation rows. Each row is labeled for the matching monitor (from `output_list` or live `xrandr` when `output_list` is `auto`). The URL in a row is what Chrome opens fullscreen on that monitor. Saving writes **`/home/kiosk/.config/kiosk.json`**; trailing rows with an empty URL are dropped.
 
 **API example** (on the kiosk):
 
@@ -148,3 +150,4 @@ Each **`git commit`** then runs **`git add --renormalize`** on **staged paths on
 ## License
 
 Use and modify at your own risk for kiosk / signage deployments. No warranty implied.
+

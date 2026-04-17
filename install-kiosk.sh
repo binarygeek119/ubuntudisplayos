@@ -12,6 +12,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   echo "URLs and layout are read from /home/kiosk/.config/kiosk.json" >&2
   echo "Web UI: installs to /usr/lib/kiosk-webui/ if kiosk-webui.py is next to this script," >&2
   echo "  or set KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py, or omit KIOSK_WEBUI_SKIP_DOWNLOAD=1 to fetch from GitHub." >&2
+  echo "System upgrade: apt upgrade runs after apt update (set KIOSK_SKIP_SYSTEM_UPGRADE=1 to skip)." >&2
   exit 1
 fi
 
@@ -27,6 +28,15 @@ SCREEN_HEIGHT="${SCREEN_HEIGHT:-768}"
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update -y
+
+# Upgrade installed packages to latest versions in this release (no full-upgrade / dist-upgrade).
+if [[ "${KIOSK_SKIP_SYSTEM_UPGRADE:-0}" != "1" ]]; then
+  export NEEDRESTART_MODE=a
+  apt-get upgrade -y \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold
+fi
+
 apt-get install -y --no-install-recommends \
   xorg openbox lightdm lightdm-gtk-greeter \
   x11-xserver-utils unclutter-xfixes dbus-x11 wget curl ca-certificates \
@@ -625,14 +635,16 @@ if [[ ! -f "${WEBUI_SRC:-}" && "${KIOSK_WEBUI_SKIP_DOWNLOAD:-0}" != "1" ]]; then
   fi
 fi
 
-if [[ -f "${WEBUI_SRC:-}" ]]; then
+if [[ -f "${WEBUI_SRC:-}" || -s /usr/lib/kiosk-webui/kiosk-webui.py ]]; then
   apt-get install -y --no-install-recommends xdg-utils
 
   rm -rf /opt/kiosk-webui
   rm -f /root/kiosk-webui-token.txt
 
-  install -d /usr/lib/kiosk-webui
-  install -m 755 "$WEBUI_SRC" /usr/lib/kiosk-webui/kiosk-webui.py
+  install -d /usr/lib/kiosk-webui /etc/systemd/system
+  if [[ -f "${WEBUI_SRC:-}" ]]; then
+    install -m 755 "$WEBUI_SRC" /usr/lib/kiosk-webui/kiosk-webui.py
+  fi
   ln -sf /usr/lib/kiosk-webui/kiosk-webui.py /usr/bin/kiosk-webui
   [[ -s /usr/lib/kiosk-webui/kiosk-webui.py ]] || {
     echo "ERROR: /usr/lib/kiosk-webui/kiosk-webui.py is missing or empty after install." >&2
@@ -704,8 +716,10 @@ DESKTOP
   umask 022
   chmod 600 /root/kiosk-webui.txt
 else
-  echo "Note: kiosk-webui.py could not be resolved (place it in ${SCRIPT_DIR}, set KIOSK_WEBUI_SRC=, or allow GitHub download)." >&2
-  echo "  Offline: copy kiosk-webui.py next to this script and re-run, or: KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py sudo $0" >&2
+  echo "ERROR: kiosk-webui.py could not be resolved and no existing /usr/lib/kiosk-webui/kiosk-webui.py was found." >&2
+  echo "  Fix one of: place kiosk-webui.py in ${SCRIPT_DIR}, set KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py, or allow GitHub download." >&2
+  echo "  Offline: copy kiosk-webui.py next to this script and re-run." >&2
+  exit 1
 fi
 
 echo
