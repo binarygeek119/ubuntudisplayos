@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.0"
+WEBUI_VERSION = "v1.0.1"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
 _version_cache_ts = 0.0
@@ -211,6 +211,10 @@ input, select { width:100%; padding:.4rem .5rem; border-radius:.35rem; border:1p
 button { margin-top:1rem; padding:.55rem 1rem; border-radius:.35rem; border:0; background:#2563eb; color:#fff; cursor:pointer; }
 button.danger { background:#b91c1c; margin-left:.5rem; }
 button.warn { background:#92400e; margin-left:.5rem; }
+button:disabled { background:#4b5563; color:#9ca3af; cursor:not-allowed; }
+.actions { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-top:1rem; }
+.actions form { margin:0; }
+.actions button { margin-top:0; }
 a { color:#93c5fd; }
 .grid { display:grid; grid-template-columns: minmax(10rem,1.1fr) 3rem 1fr 9rem; gap:.5rem .75rem; align-items:end; }
 .hdr { font-weight:600; color:#9ca3af; font-size:.75rem; margin-bottom:.25rem; }
@@ -262,6 +266,7 @@ def _form_page(
     row_labels: list[str],
     msg: str,
     update_banner: str,
+    update_available: bool,
 ) -> bytes:
     def g(key: str, default: str = "") -> str:
         return html.escape(env_map.get(key, default))
@@ -293,8 +298,13 @@ def _form_page(
 {msg_html}
 {update_banner}
 <form method="post" action="/save">
-  <label>OUTPUT_LIST</label>
-  <input name="OUTPUT_LIST" value="{g('OUTPUT_LIST', 'auto')}" autocomplete="off"/>
+  <div class="grid" style="margin-top:.25rem">
+    <div style="grid-column:1 / span 2">
+      <label>OUTPUT_LIST</label>
+      <input name="OUTPUT_LIST" value="{g('OUTPUT_LIST', 'auto')}" autocomplete="off"/>
+    </div>
+    <div></div>
+  </div>
   <div class="grid" style="margin-top:1rem">
     <div><label>MODE</label><input name="MODE" value="{g('MODE', 'auto')}" autocomplete="off"/></div>
     <div><label>CHROME_BIN</label><input name="CHROME_BIN" value="{g('CHROME_BIN', '/usr/bin/google-chrome-stable')}" autocomplete="off"/></div>
@@ -307,13 +317,12 @@ def _form_page(
   </div>
   <h2 style="margin-top:1.5rem;font-size:1.05rem">Set URL (and rotation) for each display</h2>
   {''.join(rows_html)}
-  <button type="submit">Save to kiosk.json</button>
+  <div class="actions">
+    <button type="submit">Save to kiosk.json</button>
+    <button type="submit" formaction="/reboot" formmethod="post" class="danger" onclick="return confirm('Reboot this kiosk now?');">Reboot system</button>
+    <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Run installer update now? This may restart display services.');" {'disabled title="Already up to date"' if not update_available else ''}>Update WebUI</button>
+  </div>
 </form>
-<form method="post" action="/reboot" onsubmit="return confirm('Reboot this kiosk now?');" style="margin-top:.75rem">
-  <button type="submit" class="danger">Reboot system</button>
-  <button type="submit" formaction="/update" class="warn" onclick="return confirm('Run installer update now? This may restart display services.');">Update WebUI</button>
-</form>
-<p><a href="/api/xrandr.json">Connected outputs (JSON)</a></p>
 </body></html>"""
     return body.encode("utf-8")
 
@@ -375,9 +384,13 @@ class Handler(BaseHTTPRequestHandler):
                     "Update started."
                     if ok == "3"
                     else (
+                        "Already up to date."
+                        if ok == "4"
+                        else (
                         "Reboot failed (check sudoers)."
                         if ok == "reboot_failed"
                         else ("Update failed (check sudoers/script)." if ok == "update_failed" else "")
+                        )
                     )
                 )
             )
@@ -389,7 +402,8 @@ class Handler(BaseHTTPRequestHandler):
         ver = _fetch_latest_version()
         latest = ver.get("latest", "").strip()
         update_banner = ""
-        if latest and _version_key(latest) > _version_key(WEBUI_VERSION):
+        update_available = bool(latest and _version_key(latest) > _version_key(WEBUI_VERSION))
+        if update_available:
             update_banner = (
                 '<div style="margin:.75rem 0;padding:.6rem .75rem;border:1px solid #7c2d12;'
                 'background:#431407;border-radius:.35rem;color:#fed7aa">'
@@ -397,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'(current {html.escape(WEBUI_VERSION)}). Click <strong>Update WebUI</strong> below.'
                 "</div>"
             )
-        page = _form_page(env_map, slots, labels, msg, update_banner)
+        page = _form_page(env_map, slots, labels, msg, update_banner, update_available)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -418,6 +432,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/update":
+            ver = _fetch_latest_version()
+            latest = ver.get("latest", "").strip()
+            update_available = bool(latest and _version_key(latest) > _version_key(WEBUI_VERSION))
+            if not update_available:
+                self.send_response(303)
+                self.send_header("Location", "/?ok=4")
+                self.end_headers()
+                return
             try:
                 _request_update()
                 self.send_response(303)
