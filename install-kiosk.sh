@@ -365,6 +365,44 @@ clear_chrome_singleton_locks() {
   done
 }
 
+kiosk_tabs_unhealthy() {
+  local i port
+  for ((i=0; i<${#KIOSK_PIDS[@]}; i++)); do
+    port=$((9222 + i))
+    if ! python3 - "$port" <<'TABHEALTHPY'
+import json
+import sys
+import urllib.request
+
+port = int(sys.argv[1])
+url = f"http://127.0.0.1:{port}/json/list"
+try:
+    with urllib.request.urlopen(url, timeout=1.0) as resp:
+        tabs = json.load(resp)
+except Exception:
+    # Endpoint may be briefly unavailable during launch; treat as healthy for now.
+    sys.exit(0)
+
+if not isinstance(tabs, list):
+    sys.exit(0)
+
+for t in tabs:
+    if not isinstance(t, dict):
+        continue
+    u = str(t.get("url") or "").lower()
+    title = str(t.get("title") or "").lower()
+    if u.startswith("chrome-error://") or "aw, snap" in title or "tab crashed" in title:
+        sys.exit(1)
+
+sys.exit(0)
+TABHEALTHPY
+    then
+      return 0
+    fi
+  done
+  return 1
+}
+
 is_auto_list() {
   case "${1:-}" in ''|auto|detect|any) return 0 ;; *) return 1 ;; esac
 }
@@ -568,6 +606,8 @@ launch_kiosk() {
     [[ -z "$u" ]] && u="about:blank"
     "$CHROME_BIN" "${CHROME_FLAGS[@]}" \
       --user-data-dir="$prof" \
+      --remote-debugging-address=127.0.0.1 \
+      --remote-debugging-port="$((9222 + i))" \
       --window-position="${G_X[i]},${G_Y[i]}" \
       --window-size="${G_W[i]},${G_H[i]}" \
       "$u" &
@@ -621,9 +661,13 @@ kiosk_json_sig() {
     for pid in "${KIOSK_PIDS[@]:-}"; do
       if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then ANY_DEAD=1; break; fi
     done
+    if [[ "$ANY_DEAD" -eq 0 ]] && kiosk_tabs_unhealthy; then
+      echo "[$(date '+%F %T')] detected tab crash/error page; relaunching"
+      ANY_DEAD=1
+    fi
     if [[ "$CURRENT_STATE" != "$LAST_STATE" || "$ANY_DEAD" -eq 1 ]]; then
       if [[ "$ANY_DEAD" -eq 1 ]]; then
-        echo "[$(date '+%F %T')] detected browser exit; relaunching"
+        echo "[$(date '+%F %T')] detected browser/tab failure; relaunching"
       fi
       stop_kiosk
       if launch_kiosk; then
