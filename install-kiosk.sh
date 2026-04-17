@@ -85,20 +85,30 @@ fi
 
 # Google Chrome (stable kiosk); fall back to Chromium from apt if needed.
 CHROME_BIN=""
-tmpdeb="$(mktemp --suffix=.deb /tmp/chrome.XXXXXX)"
-if wget -qO "$tmpdeb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
-  apt-get install -y "$tmpdeb" || apt-get -f install -y
-  rm -f "$tmpdeb"
+if [[ "${KIOSK_UPDATE_ONLY:-0}" == "1" ]]; then
+  if [[ -x /usr/bin/google-chrome-stable ]]; then CHROME_BIN="/usr/bin/google-chrome-stable"
+  elif [[ -x /usr/bin/chromium ]]; then CHROME_BIN="/usr/bin/chromium"
+  elif [[ -x /usr/bin/chromium-browser ]]; then CHROME_BIN="/usr/bin/chromium-browser"
+  else
+    echo "KIOSK_UPDATE_ONLY=1 but no browser binary found. Install Chrome/Chromium once, or run without KIOSK_UPDATE_ONLY." >&2
+    exit 1
+  fi
 else
-  rm -f "$tmpdeb"
-  apt-get install -y chromium-browser 2>/dev/null || apt-get install -y chromium
-fi
-if [[ -x /usr/bin/google-chrome-stable ]]; then CHROME_BIN="/usr/bin/google-chrome-stable"
-elif [[ -x /usr/bin/chromium ]]; then CHROME_BIN="/usr/bin/chromium"
-elif [[ -x /usr/bin/chromium-browser ]]; then CHROME_BIN="/usr/bin/chromium-browser"
-else
-  echo "Could not install Google Chrome or Chromium." >&2
-  exit 1
+  tmpdeb="$(mktemp --suffix=.deb /tmp/chrome.XXXXXX)"
+  if wget -qO "$tmpdeb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+    apt-get install -y "$tmpdeb" || apt-get -f install -y
+    rm -f "$tmpdeb"
+  else
+    rm -f "$tmpdeb"
+    apt-get install -y chromium-browser 2>/dev/null || apt-get install -y chromium
+  fi
+  if [[ -x /usr/bin/google-chrome-stable ]]; then CHROME_BIN="/usr/bin/google-chrome-stable"
+  elif [[ -x /usr/bin/chromium ]]; then CHROME_BIN="/usr/bin/chromium"
+  elif [[ -x /usr/bin/chromium-browser ]]; then CHROME_BIN="/usr/bin/chromium-browser"
+  else
+    echo "Could not install Google Chrome or Chromium." >&2
+    exit 1
+  fi
 fi
 
 if ! id -u "$KIOSK_USER" &>/dev/null; then
@@ -235,7 +245,13 @@ cat >"$KIOSK_HOME/.config/openbox/autostart" <<'AUTOSTART'
 #!/bin/bash
 set -euo pipefail
 
+# Managed by install-kiosk.sh (kiosk.json generation). Legacy kiosk.env/URL_LEFT scripts are unsupported.
+KIOSK_AUTOSTART_VERSION="kiosk-json-v2"
 KIOSK_JSON="${HOME}/.config/kiosk.json"
+LOG_FILE="${HOME}/.config/kiosk-autostart.log"
+touch "$LOG_FILE"
+exec >>"$LOG_FILE" 2>&1
+echo "[$(date '+%F %T')] kiosk autostart boot (${KIOSK_AUTOSTART_VERSION})"
 
 load_kiosk_json() {
   eval "$(python3 - "$KIOSK_JSON" <<'LOADPY'
@@ -307,9 +323,6 @@ kiosk_keep_display_on
 unclutter -idle 0 -root &
 xsetroot -cursor_name none 2>/dev/null || true
 
-LOG_FILE="${HOME}/.config/kiosk-autostart.log"
-touch "$LOG_FILE"
-exec >>"$LOG_FILE" 2>&1
 echo "[$(date '+%F %T')] kiosk autostart started (multi-display)"
 
 CHROME_FLAGS=(
@@ -617,6 +630,12 @@ AUTOSTART
 chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config/openbox/autostart"
 chmod 755 "$KIOSK_HOME/.config/openbox/autostart"
 chown -R "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME/.config"
+
+# Remove stale/custom startup hooks that can bypass the managed autostart script.
+rm -f /etc/xdg/openbox/autostart
+rm -f /etc/lightdm/lightdm.conf.d/98-kiosk-session-hook.conf
+rm -f /usr/local/bin/kiosk-session-start /usr/local/bin/kiosk-openbox-session
+rm -f /usr/share/xsessions/kiosk-openbox.desktop
 
 install -d /etc/lightdm/lightdm.conf.d
 rm -f /etc/lightdm/lightdm.conf.d/50-kiosk-autologin.conf

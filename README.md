@@ -29,7 +29,17 @@ sudo reboot
 
 The installer runs **`apt-get update`** then a noninteractive **`apt-get upgrade`** (updates installed packages without **`full-upgrade`** / **`dist-upgrade`**). To skip that step (faster reruns or air‑gapped hosts): **`KIOSK_SKIP_SYSTEM_UPGRADE=1 sudo ./install-kiosk.sh`**.
 
-For fast reruns on an already prepared kiosk (refresh Openbox autostart, `kiosk.json` handling, LightDM snippets, and web UI/service wiring without apt work), use: **`KIOSK_UPDATE_ONLY=1 sudo ./install-kiosk.sh`**.
+For fast reruns on an already prepared kiosk (refresh Openbox autostart, `kiosk.json` handling, LightDM snippets, and web UI/service wiring without apt work), use: **`KIOSK_UPDATE_ONLY=1 sudo ./install-kiosk.sh`** (requires an already installed Chrome/Chromium binary).
+Reruns also remove stale custom startup overrides that can break kiosk launch (`/etc/xdg/openbox/autostart`, `98-kiosk-session-hook.conf`, and old custom `kiosk-openbox` session wrappers).
+
+Next command to run on kiosk:
+
+```bash
+cd /home/binarygeek119/ubuntudisplayos
+chmod +x install-kiosk.sh
+sudo KIOSK_UPDATE_ONLY=1 ./install-kiosk.sh
+sudo systemctl restart lightdm
+```
 
 The **web UI** is installed to **`/usr/lib/kiosk-webui/kiosk-webui.py`** (plus **`/usr/bin/kiosk-webui`**, **`kiosk-webui.service`**, and the **“Kiosk display config”** menu entry) when **`install-kiosk.sh`** can find **`kiosk-webui.py`**: same folder as the script, **`KIOSK_WEBUI_SRC=/path/to/kiosk-webui.py`**, or—if the machine has network—by **downloading** from GitHub (`main` branch) unless **`KIOSK_WEBUI_SKIP_DOWNLOAD=1`**. Override the URL with **`KIOSK_WEBUI_URL=…`** if needed.
 
