@@ -296,7 +296,7 @@ def _update_status_panel() -> str:
     return (
         '<div style="margin:.75rem 0;padding:.6rem .75rem;border:1px solid #374151;'
         'background:#111827;border-radius:.35rem">'
-        f'<div style="font-weight:600;color:{color};margin-bottom:.35rem">Update status: {html.escape(status)}</div>'
+        f'<div id="update-status-label" style="font-weight:600;color:{color};margin-bottom:.35rem">Update status: {html.escape(status)}</div>'
         f'<pre style="margin:0;white-space:pre-wrap;color:#d1d5db;font-size:.78rem">{html.escape(tail)}</pre>'
         "</div>"
     )
@@ -332,6 +332,19 @@ def _form_page(
         )
 
     msg_html = f'<p style="color:#86efac">{html.escape(msg)}</p>' if msg else ""
+    update_poll_js = """
+<script>
+(() => {
+  const label = document.getElementById("update-status-label");
+  if (!label) return;
+  const txt = (label.textContent || "").toLowerCase();
+  if (txt.includes("running")) {
+    setTimeout(() => window.location.reload(), 2000);
+  }
+})();
+</script>
+""" if update_panel else ""
+
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Kiosk display config</title><style>{PAGE_CSS}</style></head><body>
@@ -367,6 +380,7 @@ def _form_page(
     <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');" {'disabled title="Already up to date"' if not update_available else ''}>Update &amp; Reboot</button>
   </div>
 </form>
+{update_poll_js}
 </body></html>"""
     return body.encode("utf-8")
 
@@ -383,6 +397,10 @@ def _request_reboot() -> None:
 
 def _request_update() -> None:
     """Launch installer refresh in background; helper script performs update and service refresh."""
+    with open(UPDATE_STATUS_FILE, "w", encoding="utf-8") as f:
+        f.write("running\n")
+    with open(UPDATE_LOG_FILE, "w", encoding="utf-8") as f:
+        f.write(f"[{time.strftime('%F %T')}] update requested from web UI\n")
     subprocess.Popen(  # noqa: S603,S607
         ["sudo", "-n", "/usr/local/bin/kiosk-self-update"],
         stdout=subprocess.DEVNULL,

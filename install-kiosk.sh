@@ -315,6 +315,7 @@ G_Y=()
 
 kiosk_keep_display_on() {
   # Drivers or clients sometimes re-enable DPMS; safe to call repeatedly.
+  xset dpms 0 0 0 2>/dev/null || true
   xset s off 2>/dev/null || true
   xset s noblank 2>/dev/null || true
   xset -dpms 2>/dev/null || true
@@ -601,8 +602,8 @@ kiosk_json_sig() {
   TICK=0
   while true; do
     TICK=$((TICK + 1))
-    # Re-apply ~every 60s (loop sleeps 2s) so blanking stays off if something toggles DPMS.
-    if (( TICK % 30 == 0 )); then
+    # Re-apply ~every 10s (loop sleeps 2s) so blanking stays off if something toggles DPMS.
+    if (( TICK % 5 == 0 )); then
       kiosk_keep_display_on
     fi
     load_kiosk_json
