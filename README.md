@@ -75,7 +75,7 @@ sudo cat /root/kiosk-greeter-password.txt
 
 After install (with `kiosk-webui.py` present):
 
-- Service: `kiosk-webui.service` (runs as user `kiosk`)
+- Service: `kiosk-webui.service` (runs as user `kiosk`), **enabled on boot** via `multi-user.target` and `graphical.target` (starts even before the GUI session is up).
 - Default listen: **`0.0.0.0:8780`**
 - Token: `/etc/kiosk-webui.env` (`TOKEN=...`) and copy in `/root/kiosk-webui-token.txt`
 

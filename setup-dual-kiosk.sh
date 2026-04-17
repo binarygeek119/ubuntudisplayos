@@ -466,7 +466,7 @@ if [[ -f "$WEBUI_SRC" ]]; then
   cat >/etc/systemd/system/kiosk-webui.service <<'WEBUISVC'
 [Unit]
 Description=Kiosk display and URL web config
-After=lightdm.service network-online.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -476,14 +476,15 @@ Group=kiosk
 EnvironmentFile=/etc/kiosk-webui.env
 Environment=KIOSK_USER=kiosk
 ExecStart=/usr/bin/python3 /opt/kiosk-webui/kiosk-webui.py
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target graphical.target
 WEBUISVC
 
   systemctl daemon-reload
+  # Enable for both targets so the UI starts on every boot (SSH / text or full GUI).
   systemctl enable kiosk-webui.service
   systemctl restart kiosk-webui.service 2>/dev/null || true
 
