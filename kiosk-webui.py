@@ -26,6 +26,8 @@ DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudis
 _VERSION_CACHE_TTL_SEC = 300
 _version_cache_ts = 0.0
 _version_cache_payload: dict[str, str] | None = None
+UPDATE_STATUS_FILE = "/tmp/kiosk-self-update.status"
+UPDATE_LOG_FILE = "/tmp/kiosk-self-update.log"
 
 
 def _conf() -> dict[str, str]:
@@ -56,6 +58,14 @@ def _load_kiosk_raw(path: str) -> dict:
         return d if isinstance(d, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _read_text(path: str, default: str = "") -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return default
 
 
 def _default_kiosk() -> dict:
@@ -275,6 +285,23 @@ def _start_update_check_task() -> None:
     t.start()
 
 
+def _update_status_panel() -> str:
+    status = _read_text(UPDATE_STATUS_FILE).strip().lower()
+    if status not in {"running", "success", "failed"}:
+        return ""
+    log_txt = _read_text(UPDATE_LOG_FILE)
+    lines = [ln for ln in log_txt.splitlines() if ln.strip()]
+    tail = "\n".join(lines[-30:]) if lines else "(no output yet)"
+    color = "#93c5fd" if status == "running" else ("#86efac" if status == "success" else "#fca5a5")
+    return (
+        '<div style="margin:.75rem 0;padding:.6rem .75rem;border:1px solid #374151;'
+        'background:#111827;border-radius:.35rem">'
+        f'<div style="font-weight:600;color:{color};margin-bottom:.35rem">Update status: {html.escape(status)}</div>'
+        f'<pre style="margin:0;white-space:pre-wrap;color:#d1d5db;font-size:.78rem">{html.escape(tail)}</pre>'
+        "</div>"
+    )
+
+
 def _form_page(
     env_map: dict[str, str],
     slots: list[tuple[str, str, str]],
@@ -282,6 +309,7 @@ def _form_page(
     msg: str,
     update_banner: str,
     update_available: bool,
+    update_panel: str,
 ) -> bytes:
     def g(key: str, default: str = "") -> str:
         return html.escape(env_map.get(key, default))
@@ -312,6 +340,7 @@ def _form_page(
 <p><code>OUTPUT_LIST</code>: comma-separated <code>xrandr</code> names, or <code>auto</code> for all connected heads. Only detected displays are shown below.</p>
 {msg_html}
 {update_banner}
+{update_panel}
 <form method="post" action="/save">
   <div class="grid" style="margin-top:.25rem">
     <div style="grid-column:1 / span 2">
@@ -335,7 +364,7 @@ def _form_page(
   <div class="actions">
     <button type="submit">Save to kiosk.json</button>
     <button type="submit" formaction="/reboot" formmethod="post" class="danger" onclick="return confirm('Reboot this kiosk now?');">Reboot system</button>
-    <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Run installer update now? This may restart display services.');" {'disabled title="Already up to date"' if not update_available else ''}>Update WebUI</button>
+    <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');" {'disabled title="Already up to date"' if not update_available else ''}>Update &amp; Reboot</button>
   </div>
 </form>
 </body></html>"""
@@ -426,7 +455,8 @@ class Handler(BaseHTTPRequestHandler):
                 f'(current {html.escape(WEBUI_VERSION)}). Click <strong>Update WebUI</strong> below.'
                 "</div>"
             )
-        page = _form_page(env_map, slots, labels, msg, update_banner, update_available)
+        update_panel = _update_status_panel()
+        page = _form_page(env_map, slots, labels, msg, update_banner, update_available, update_panel)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))

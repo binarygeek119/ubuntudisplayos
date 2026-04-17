@@ -765,6 +765,12 @@ REBOOTSUDO
 #!/usr/bin/env bash
 set -euo pipefail
 
+STATUS_FILE="/tmp/kiosk-self-update.status"
+LOG_FILE="/tmp/kiosk-self-update.log"
+echo "running" >"$STATUS_FILE"
+{
+  echo "[$(date '+%F %T')] update start"
+
 PATH_FILE="/etc/kiosk-installer-path"
 [[ -f "$PATH_FILE" ]] || exit 1
 INSTALLER_DIR="$(cat "$PATH_FILE")"
@@ -779,7 +785,10 @@ if [[ ! -x ./install-kiosk.sh ]]; then
   chmod +x ./install-kiosk.sh
 fi
 
-KIOSK_SKIP_SYSTEM_UPGRADE=1 KIOSK_UPDATE_ONLY=1 ./install-kiosk.sh
+KIOSK_SKIP_SYSTEM_UPGRADE=1 ./install-kiosk.sh
+echo "[$(date '+%F %T')] update complete; rebooting"
+} >"$LOG_FILE" 2>&1 && echo "success" >"$STATUS_FILE" || { echo "failed" >"$STATUS_FILE"; exit 1; }
+systemctl reboot
 SELFUPDATE
   chmod 755 /usr/local/bin/kiosk-self-update
 
