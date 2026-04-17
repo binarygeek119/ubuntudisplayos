@@ -120,7 +120,15 @@ getent group autologin >/dev/null 2>&1 || groupadd --system autologin
 getent group nopasswdlogin >/dev/null 2>&1 || groupadd --system nopasswdlogin
 usermod -aG autologin,nopasswdlogin "$KIOSK_USER"
 # If autologin fails, --disabled-password leaves no greeter password → you are stuck. Always set a fallback password.
-KIOSK_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
+# Avoid tr|head SIGPIPE (141) under `set -euo pipefail`.
+KIOSK_PASS="$(python3 - <<'PY'
+import secrets
+import string
+
+alphabet = string.ascii_letters + string.digits
+print(''.join(secrets.choice(alphabet) for _ in range(20)))
+PY
+)"
 echo "${KIOSK_USER}:${KIOSK_PASS}" | chpasswd
 usermod -U "$KIOSK_USER" 2>/dev/null || true
 umask 077
