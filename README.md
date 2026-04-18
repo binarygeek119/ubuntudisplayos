@@ -4,6 +4,8 @@ Turn **Ubuntu Server/Desktop 24.04** into a **multi-display web kiosk**: one ful
 
 Repository: [github.com/binarygeek119/ubuntudisplayos](https://github.com/binarygeek119/ubuntudisplayos)
 
+**Discord:** [https://discord.gg/vftKQvpT](https://discord.gg/vftKQvpT) — community and kiosk discussion.
+
 > Built purely with AI assistance.
 
 **Sister project:** Ubuntu Display OS is meant to run alongside **[posterrX](https://github.com/binarygeek119/posterrX)** — this repo handles the kiosk host (Chrome, LightDM, multi-head layout), while **[binarygeek119/posterrX](https://github.com/binarygeek119/posterrX)** (a fork of the original Posterr) can serve or coordinate the poster-style content you show on those displays.

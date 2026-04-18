@@ -21,7 +21,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.2"
+WEBUI_VERSION = "v1.0.3"
+DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
 _version_cache_ts = 0.0
@@ -380,6 +381,12 @@ def _form_page(
     <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');" {'disabled title="Already up to date"' if not update_available else ''}>Update &amp; Reboot</button>
   </div>
 </form>
+<p style="margin-top:2rem;padding-top:1rem;border-top:1px solid #374151;font-size:.85rem;color:#9ca3af">
+Community:
+<a href="{html.escape(DISCORD_INVITE_URL)}" rel="noopener noreferrer" target="_blank">Discord server</a>
+<span style="color:#6b7280"> — </span>
+<span>Ubuntu Display OS / kiosk discussion</span>
+</p>
 {update_poll_js}
 </body></html>"""
     return body.encode("utf-8")
