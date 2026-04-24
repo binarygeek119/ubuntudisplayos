@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.10"
+WEBUI_VERSION = "v1.0.11"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -443,6 +443,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         user, home, path_json = _kiosk_paths()
+
+        if path == "/reload":
+            _trigger_kiosk_reload(user, home)
+            self.send_response(303)
+            self.send_header("Location", "/?ok=5")
+            self.end_headers()
+            return
 
         if path == "/api/xrandr.json":
             data = _xrandr_json(user, home).encode()
