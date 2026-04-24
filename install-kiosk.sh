@@ -41,7 +41,7 @@ if [[ "${KIOSK_UPDATE_ONLY:-0}" != "1" ]]; then
 
   apt-get install -y --no-install-recommends \
     xorg openbox lightdm lightdm-gtk-greeter \
-    x11-xserver-utils unclutter-xfixes dbus-x11 wget curl ca-certificates \
+    x11-xserver-utils unclutter-xfixes dbus-x11 wget curl ca-certificates wmctrl \
     python3-minimal
 else
   echo "KIOSK_UPDATE_ONLY=1: skipping apt update/upgrade/install; refreshing kiosk configs/services only."
@@ -376,6 +376,21 @@ clear_chrome_singleton_locks() {
   done
 }
 
+enforce_chrome_window_layout() {
+  # Ensure each launched browser PID is moved/resized to its monitor geometry.
+  command -v wmctrl >/dev/null 2>&1 || return 0
+  local i pid wid
+  for ((i=0; i<${#KIOSK_PIDS[@]}; i++)); do
+    pid="${KIOSK_PIDS[i]}"
+    [[ -n "$pid" ]] || continue
+    wid="$(wmctrl -lp 2>/dev/null | awk -v p="$pid" '$3==p {print $1; exit}')"
+    [[ -n "$wid" ]] || continue
+    wmctrl -ir "$wid" -b remove,maximized_vert,maximized_horz,fullscreen >/dev/null 2>&1 || true
+    wmctrl -ir "$wid" -e "0,${G_X[i]},${G_Y[i]},${G_W[i]},${G_H[i]}" >/dev/null 2>&1 || true
+    wmctrl -ir "$wid" -b add,fullscreen >/dev/null 2>&1 || true
+  done
+}
+
 startup_delay_if_needed() {
   local delay_raw delay=0
   delay_raw="${STARTUP_DELAY_SEC:-0}"
@@ -657,6 +672,9 @@ launch_kiosk() {
       "$u" &
     KIOSK_PIDS+=($!)
   done
+  # Give windows a moment to appear, then pin each PID to its display.
+  sleep 1
+  enforce_chrome_window_layout
   echo "[$(date '+%F %T')] launched ${#KIOSK_PIDS[@]} kiosk window(s)"
   return 0
 }
