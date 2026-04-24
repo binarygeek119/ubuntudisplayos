@@ -59,7 +59,7 @@ Everything the kiosk session and web UI need lives in **`/home/kiosk/.config/kio
 | **`screen_width`** / **`screen_height`** | Fallback when geometry cannot be read from `xrandr`. |
 | **`chrome_bin`** | Path to Chrome or Chromium. |
 | **`startup_delay_sec`** | Delay (seconds) before the first kiosk window launch for any setup; useful when target apps/services need extra startup time. If set to `0`, kiosk auto-adds **60s** when Docker is installed and at least one Docker image exists. |
-| **`displays`** | Array of objects **`{ "url": "…", "rotation": "normal" }`**, in order: index **0** = first / leftmost monitor, then **1**, … up to **24** slots in the web form. |
+| **`displays`** | Array of objects **`{ "url": "…", "rotation": "normal", "mode": "" }`**, in order: index **0** = first / leftmost monitor, then **1**, … up to **24** slots in the web form. `mode` is per-display resolution (`auto`, `default`, or values like `1920x1080`); empty falls back to global `mode`. |
 
 **`rotation`** values: `normal`, `left`, `right`, `inverted`.
 
@@ -80,8 +80,8 @@ Example (abbreviated):
   "chrome_bin": "/usr/bin/google-chrome-stable",
   "startup_delay_sec": "0",
   "displays": [
-    { "url": "https://example.com/", "rotation": "normal" },
-    { "url": "https://example.org/", "rotation": "normal" }
+    { "url": "https://example.com/", "rotation": "normal", "mode": "1920x1080" },
+    { "url": "https://example.org/", "rotation": "normal", "mode": "1080x1920" }
   ]
 }
 ```

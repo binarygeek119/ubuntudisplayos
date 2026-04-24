@@ -158,8 +158,8 @@ if cfg.is_file():
     sys.exit(0)
 
 defaults_disp = [
-    {"url": "http://127.0.0.1:9877", "rotation": "normal"},
-    {"url": "http://127.0.0.1:9876", "rotation": "normal"},
+    {"url": "http://127.0.0.1:9877", "rotation": "normal", "mode": ""},
+    {"url": "http://127.0.0.1:9876", "rotation": "normal", "mode": ""},
 ]
 
 
@@ -276,8 +276,8 @@ defaults = {
     "chrome_bin": "/usr/bin/google-chrome-stable",
     "startup_delay_sec": "0",
     "displays": [
-        {"url": "http://127.0.0.1:9877", "rotation": "normal"},
-        {"url": "http://127.0.0.1:9876", "rotation": "normal"},
+        {"url": "http://127.0.0.1:9877", "rotation": "normal", "mode": ""},
+        {"url": "http://127.0.0.1:9876", "rotation": "normal", "mode": ""},
     ],
 }
 try:
@@ -316,6 +316,7 @@ OUTPUT_LIST="${OUTPUT_LIST:-auto}"
 KOUT=()
 KU_URL=()
 KU_ROT=()
+KU_MODE=()
 KIOSK_PIDS=()
 G_W=()
 G_H=()
@@ -442,16 +443,18 @@ is_auto_list() {
 read_url_slots() {
   KU_URL=()
   KU_ROT=()
+  KU_MODE=()
   [[ -f "$KIOSK_JSON" ]] || return 1
-  local u r
+  local u r m
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    u="${line%%$'\t'*}"
-    r="${line#*$'\t'}"
+    IFS=$'\t' read -r u r m <<< "$line"
     r="${r:-normal}"
     case "$r" in normal|left|right|inverted) ;; *) r="normal" ;; esac
+    m="${m:-}"
     KU_URL+=("$u")
     KU_ROT+=("$r")
+    KU_MODE+=("$m")
   done < <(python3 - "$KIOSK_JSON" <<'URLPY'
 import json, sys
 
@@ -470,7 +473,8 @@ for d in c.get("displays") or []:
     r = (d.get("rotation") or "normal").strip().lower() or "normal"
     if r not in ("normal", "left", "right", "inverted"):
         r = "normal"
-    print(u + "\t" + r)
+    m = str(d.get("mode") or "").strip()
+    print(u + "\t" + r + "\t" + m)
 URLPY
 )
 }
@@ -523,7 +527,7 @@ build_kout_array() {
 }
 
 pad_urls_to_outputs() {
-  local n="$1" lastu lastr
+  local n="$1" lastu lastr lastm
   if [[ ${#KU_URL[@]} -lt 1 ]]; then
     echo "[$(date '+%F %T')] waiting: no URLs in ${KIOSK_JSON} (displays[].url)"
     return 1
@@ -531,12 +535,15 @@ pad_urls_to_outputs() {
   while [[ ${#KU_URL[@]} -lt "$n" ]]; do
     lastu="${KU_URL[-1]}"
     lastr="${KU_ROT[-1]}"
+    lastm="${KU_MODE[-1]}"
     KU_URL+=("$lastu")
     KU_ROT+=("$lastr")
+    KU_MODE+=("$lastm")
   done
   while [[ ${#KU_URL[@]} -gt "$n" ]]; do
     unset 'KU_URL[-1]'
     unset 'KU_ROT[-1]'
+    unset 'KU_MODE[-1]'
   done
 }
 
@@ -570,20 +577,22 @@ launch_kiosk() {
     return 1
   fi
 
-  local i prev xr_args=()
+  local i prev disp_mode xr_args=()
   for ((i=0; i<n; i++)); do
+    disp_mode="${KU_MODE[i]:-}"
+    [[ -n "$disp_mode" ]] || disp_mode="${MODE}"
     if [[ "$i" -eq 0 ]]; then
-      if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+      if [[ "${disp_mode}" == "auto" || "${disp_mode}" == "default" ]]; then
         xr_args+=(--output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --primary --pos 0x0)
       else
-        xr_args+=(--output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --primary --pos 0x0)
+        xr_args+=(--output "${KOUT[i]}" --mode "$disp_mode" --rotate "${KU_ROT[i]}" --primary --pos 0x0)
       fi
       prev="${KOUT[i]}"
     else
-      if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+      if [[ "${disp_mode}" == "auto" || "${disp_mode}" == "default" ]]; then
         xr_args+=(--output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --right-of "$prev")
       else
-        xr_args+=(--output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --right-of "$prev")
+        xr_args+=(--output "${KOUT[i]}" --mode "$disp_mode" --rotate "${KU_ROT[i]}" --right-of "$prev")
       fi
       prev="${KOUT[i]}"
     fi
@@ -593,17 +602,19 @@ launch_kiosk() {
     echo "[$(date '+%F %T')] WARN: combined xrandr apply failed; retrying per-output"
     # Some GPU/driver stacks reject a large combined command; retry output-by-output.
     for ((i=0; i<n; i++)); do
+      disp_mode="${KU_MODE[i]:-}"
+      [[ -n "$disp_mode" ]] || disp_mode="${MODE}"
       if [[ "$i" -eq 0 ]]; then
-        if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+        if [[ "${disp_mode}" == "auto" || "${disp_mode}" == "default" ]]; then
           xrandr --output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --primary --pos 0x0 || true
         else
-          xrandr --output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --primary --pos 0x0 || true
+          xrandr --output "${KOUT[i]}" --mode "$disp_mode" --rotate "${KU_ROT[i]}" --primary --pos 0x0 || true
         fi
       else
-        if [[ "${MODE}" == "auto" || "${MODE}" == "default" ]]; then
+        if [[ "${disp_mode}" == "auto" || "${disp_mode}" == "default" ]]; then
           xrandr --output "${KOUT[i]}" --auto --rotate "${KU_ROT[i]}" --right-of "${KOUT[i-1]}" || true
         else
-          xrandr --output "${KOUT[i]}" --mode "$MODE" --rotate "${KU_ROT[i]}" --right-of "${KOUT[i-1]}" || true
+          xrandr --output "${KOUT[i]}" --mode "$disp_mode" --rotate "${KU_ROT[i]}" --right-of "${KOUT[i-1]}" || true
         fi
       fi
     done

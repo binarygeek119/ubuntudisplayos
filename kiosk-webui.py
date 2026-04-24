@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.14"
+WEBUI_VERSION = "v1.1.0"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -78,8 +78,8 @@ def _default_kiosk() -> dict:
         "chrome_bin": "/usr/bin/google-chrome-stable",
         "startup_delay_sec": "0",
         "displays": [
-            {"url": "http://127.0.0.1:9877", "rotation": "normal"},
-            {"url": "http://127.0.0.1:9876", "rotation": "normal"},
+            {"url": "http://127.0.0.1:9877", "rotation": "normal", "mode": ""},
+            {"url": "http://127.0.0.1:9876", "rotation": "normal", "mode": ""},
         ],
     }
 
@@ -127,21 +127,22 @@ def _form_env_map(data: dict) -> dict[str, str]:
     }
 
 
-def _load_slots(data: dict) -> list[tuple[str, str, str]]:
-    """(slot, url, rot) for 01..MAX_SLOTS from displays array."""
+def _load_slots(data: dict) -> list[tuple[str, str, str, str]]:
+    """(slot, url, rot, mode) for 01..MAX_SLOTS from displays array."""
     disp = data.get("displays")
     if not isinstance(disp, list):
         disp = []
-    rows: list[tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for i in range(1, MAX_SLOTS + 1):
         slot = f"{i:02d}"
-        u, r = "", "normal"
+        u, r, m = "", "normal", ""
         if i - 1 < len(disp) and isinstance(disp[i - 1], dict):
             u = str(disp[i - 1].get("url", "")).strip()
             r = str(disp[i - 1].get("rotation", "normal")).strip().lower() or "normal"
             if r not in ROT_OK:
                 r = "normal"
-        rows.append((slot, u, r))
+            m = str(disp[i - 1].get("mode", "")).strip()
+        rows.append((slot, u, r, m))
     return rows
 
 
@@ -349,7 +350,7 @@ def _update_status_panel() -> str:
 
 def _form_page(
     env_map: dict[str, str],
-    slots: list[tuple[str, str, str]],
+    slots: list[tuple[str, str, str, str]],
     row_labels: list[str],
     msg: str,
     update_banner: str,
@@ -360,11 +361,11 @@ def _form_page(
         return html.escape(env_map.get(key, default))
 
     rows_html = [
-        '<div class="grid hdr"><div>Monitor</div><div>Slot</div><div>URL for this display</div><div>Rotation</div></div>'
+        '<div class="grid hdr"><div>Monitor</div><div>Slot</div><div>URL for this display</div><div>Rotation</div><div>Resolution</div></div>'
     ]
     visible_count = min(len(slots), max(1, len(row_labels)))
     for j in range(visible_count):
-        slot, u, r = slots[j]
+        slot, u, r, m = slots[j]
         lab = row_labels[j] if j < len(row_labels) else f"Display {j + 1}"
         rows_html.append(
             f'<div class="grid">'
@@ -373,6 +374,8 @@ def _form_page(
             f'<div><input name="URL_{slot}" type="text" inputmode="url" value="{html.escape(u)}" '
             f'placeholder="https://…" title="This URL opens in the Chrome window for this monitor" autocomplete="off"/></div>'
             f'<div>{_sel(f"ROT_{slot}", r)}</div>'
+            f'<div><input name="MODE_{slot}" type="text" value="{html.escape(m)}" '
+            f'placeholder="auto or 1920x1080" title="Per-display mode/resolution. Empty = global MODE." autocomplete="off"/></div>'
             f"</div>"
         )
 
@@ -609,7 +612,8 @@ class Handler(BaseHTTPRequestHandler):
             r = one(f"ROT_{slot}") or "normal"
             if r not in ROT_OK:
                 r = "normal"
-            displays.append({"url": u, "rotation": r})
+            m = one(f"MODE_{slot}")
+            displays.append({"url": u, "rotation": r, "mode": m})
         while displays and not displays[-1]["url"].strip():
             displays.pop()
 
