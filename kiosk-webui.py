@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.11"
+WEBUI_VERSION = "v1.0.13"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -167,6 +167,33 @@ def _trigger_kiosk_reload(user: str, home: str) -> None:
         f'if ! pgrep -f "google-chrome|chromium|chromium-browser" >/dev/null 2>&1; then '
         f'nohup "{autostart}" >/dev/null 2>&1 & '
         f"fi"
+    )
+    try:
+        subprocess.Popen(["/bin/bash", "-lc", cmd], start_new_session=True)  # noqa: S603,S607
+    except OSError:
+        pass
+
+
+def _fix_chrome_layout(user: str, home: str) -> None:
+    """Try to guarantee one kiosk browser window per connected display."""
+    _trigger_kiosk_reload(user, home)
+    autostart = f"{home}/.config/openbox/autostart"
+    # If tools are available, move/resize windows to match each connected output.
+    cmd = (
+        "sleep 8; "
+        "mapfile -t geoms < <(xrandr --query 2>/dev/null | awk '/ connected/ {for(i=1;i<=NF;i++) "
+        "if($i ~ /^[0-9]+x[0-9]+\\+[0-9]+\\+[0-9]+$/){print $i; break}}'); "
+        "outputs=${#geoms[@]}; "
+        "wins=$(pgrep -fc 'google-chrome|chromium|chromium-browser'); "
+        f'if [ "$wins" -lt "$outputs" ]; then nohup "{autostart}" >/dev/null 2>&1 & sleep 4; fi; '
+        "command -v wmctrl >/dev/null 2>&1 || exit 0; "
+        "mapfile -t wids < <(wmctrl -lx 2>/dev/null | awk 'tolower($3) ~ /(google-chrome|chromium)/ {print $1}'); "
+        "limit=${#wids[@]}; [ $outputs -lt $limit ] && limit=$outputs; "
+        "for ((i=0;i<limit;i++)); do "
+        "  g=${geoms[$i]}; "
+        "  w=${g%%x*}; r=${g#*x}; h=${r%%+*}; r=${r#*+}; x=${r%%+*}; y=${r#*+}; "
+        "  wmctrl -ir \"${wids[$i]}\" -e \"0,$x,$y,$w,$h\" >/dev/null 2>&1 || true; "
+        "done"
     )
     try:
         subprocess.Popen(["/bin/bash", "-lc", cmd], start_new_session=True)  # noqa: S603,S607
@@ -388,6 +415,7 @@ def _form_page(
   <div class="actions">
     <button type="submit">Save to kiosk.json</button>
     <button type="submit" formaction="/reload" formmethod="post" class="warn" onclick="return confirm('Reload kiosk browser pages now?');">Reload pages</button>
+    <button type="submit" formaction="/fix-layout" formmethod="post" class="warn" onclick="return confirm('Fix Chrome layout now? This should restore one browser window per display.');">Fix Chrome layout</button>
     <button type="submit" formaction="/reboot" formmethod="post" class="danger" onclick="return confirm('Reboot this kiosk now?');">Reboot system</button>
     <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');">Update &amp; Reboot</button>
   </div>
@@ -450,6 +478,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/?ok=5")
             self.end_headers()
             return
+        if path == "/fix-layout":
+            _fix_chrome_layout(user, home)
+            self.send_response(303)
+            self.send_header("Location", "/?ok=6")
+            self.end_headers()
+            return
 
         if path == "/api/xrandr.json":
             data = _xrandr_json(user, home).encode()
@@ -480,9 +514,13 @@ class Handler(BaseHTTPRequestHandler):
                         "Pages reloaded."
                         if ok == "5"
                         else (
-                        "Reboot failed (check sudoers)."
-                        if ok == "reboot_failed"
-                        else ("Update failed (check sudoers/script)." if ok == "update_failed" else "")
+                        "Chrome layout fix started."
+                        if ok == "6"
+                        else (
+                            "Reboot failed (check sudoers)."
+                            if ok == "reboot_failed"
+                            else ("Update failed (check sudoers/script)." if ok == "update_failed" else "")
+                        )
                         )
                     )
                 )
@@ -540,6 +578,12 @@ class Handler(BaseHTTPRequestHandler):
             _trigger_kiosk_reload(user, home)
             self.send_response(303)
             self.send_header("Location", "/?ok=5")
+            self.end_headers()
+            return
+        if parsed.path == "/fix-layout":
+            _fix_chrome_layout(user, home)
+            self.send_response(303)
+            self.send_header("Location", "/?ok=6")
             self.end_headers()
             return
 
