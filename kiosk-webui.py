@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.8"
+WEBUI_VERSION = "v1.0.10"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -153,13 +153,25 @@ def _write_kiosk(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
-def _trigger_kiosk_reload() -> None:
-    """Best-effort: terminate browser windows so the watcher relaunches with fresh config."""
+def _trigger_kiosk_reload(user: str, home: str) -> None:
+    """Terminate browser windows and ensure kiosk autostart loop is running."""
     for pat in ("google-chrome", "chromium", "chromium-browser"):
         try:
             subprocess.run(["pkill", "-f", pat], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
             pass
+    # Fallback: if watcher is not running, bootstrap autostart once.
+    autostart = f"{home}/.config/openbox/autostart"
+    cmd = (
+        f'sleep 4; '
+        f'if ! pgrep -f "google-chrome|chromium|chromium-browser" >/dev/null 2>&1; then '
+        f'nohup "{autostart}" >/dev/null 2>&1 & '
+        f"fi"
+    )
+    try:
+        subprocess.Popen(["/bin/bash", "-lc", cmd], start_new_session=True)  # noqa: S603,S607
+    except OSError:
+        pass
 
 
 def _xrandr_json(user: str, home: str) -> str:
@@ -375,6 +387,7 @@ def _form_page(
   {''.join(rows_html)}
   <div class="actions">
     <button type="submit">Save to kiosk.json</button>
+    <button type="submit" formaction="/reload" formmethod="post" class="warn" onclick="return confirm('Reload kiosk browser pages now?');">Reload pages</button>
     <button type="submit" formaction="/reboot" formmethod="post" class="danger" onclick="return confirm('Reboot this kiosk now?');">Reboot system</button>
     <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');">Update &amp; Reboot</button>
   </div>
@@ -457,8 +470,8 @@ class Handler(BaseHTTPRequestHandler):
                     "Update started."
                     if ok == "3"
                     else (
-                        "Already up to date."
-                        if ok == "4"
+                        "Pages reloaded."
+                        if ok == "5"
                         else (
                         "Reboot failed (check sudoers)."
                         if ok == "reboot_failed"
@@ -516,6 +529,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if parsed.path == "/reload":
+            _trigger_kiosk_reload(user, home)
+            self.send_response(303)
+            self.send_header("Location", "/?ok=5")
+            self.end_headers()
+            return
+
         if parsed.path != "/save":
             self.send_response(404)
             self.end_headers()
@@ -556,7 +576,7 @@ class Handler(BaseHTTPRequestHandler):
                 out[k] = prev[k]
 
         _write_kiosk(path_json, out)
-        _trigger_kiosk_reload()
+        _trigger_kiosk_reload(user, home)
 
         try:
             pw = pwd.getpwnam(user)

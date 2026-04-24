@@ -253,6 +253,12 @@ set -euo pipefail
 KIOSK_AUTOSTART_VERSION="kiosk-json-v2"
 KIOSK_JSON="${HOME}/.config/kiosk.json"
 LOG_FILE="${HOME}/.config/kiosk-autostart.log"
+LOCK_DIR="${HOME}/.config/.kiosk-autostart.lock"
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  # Another autostart watcher is already running for this user/session.
+  exit 0
+fi
+trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 touch "$LOG_FILE"
 exec >>"$LOG_FILE" 2>&1
 echo "[$(date '+%F %T')] kiosk autostart boot (${KIOSK_AUTOSTART_VERSION})"
