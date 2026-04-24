@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.1.0"
+WEBUI_VERSION = "v1.2.0"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -238,7 +238,45 @@ def _connected_output_names(user: str, home: str) -> list[str]:
     return [str(o["name"]) for o in data.get("outputs", [])]
 
 
-def _display_row_labels(env_map: dict[str, str], user: str, home: str) -> list[str]:
+def _xrandr_output_modes(user: str, home: str) -> dict[str, list[str]]:
+    env = os.environ.copy()
+    env["DISPLAY"] = ":0"
+    env["XAUTHORITY"] = f"{home}/.Xauthority"
+    try:
+        p = subprocess.run(
+            ["xrandr", "--query"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        text = p.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+    out: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line and not line.startswith((" ", "\t")):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "connected":
+                current = parts[0]
+                out.setdefault(current, [])
+            else:
+                current = None
+            continue
+        if current is None:
+            continue
+        m = re.match(r"^\s*([0-9]+x[0-9]+)\b", line)
+        if not m:
+            continue
+        mode = m.group(1)
+        if mode not in out[current]:
+            out[current].append(mode)
+    return out
+
+
+def _display_row_meta(env_map: dict[str, str], user: str, home: str) -> list[tuple[str, str]]:
     connected = _connected_output_names(user, home)
     ol = (env_map.get("OUTPUT_LIST") or "auto").strip().lower()
     if ol in ("", "auto", "detect", "any"):
@@ -249,13 +287,13 @@ def _display_row_labels(env_map: dict[str, str], user: str, home: str) -> list[s
         names = configured if all(n in connected for n in configured) else connected
     if len(names) > MAX_SLOTS:
         names = names[:MAX_SLOTS]
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     # Hide unused rows: only show detected/selected displays (at least one row for first-time setup).
     if not names:
-        return ["Display 1 (no outputs detected yet)"]
+        return [("Display 1 (no outputs detected yet)", "")]
     for i in range(len(names)):
         idx = i + 1
-        out.append(f"Display {idx} — {names[i]}")
+        out.append((f"Display {idx} — {names[i]}", names[i]))
     return out
 
 
@@ -273,7 +311,7 @@ button:disabled { background:#4b5563; color:#9ca3af; cursor:not-allowed; }
 .actions form { margin:0; }
 .actions button { margin-top:0; }
 a { color:#93c5fd; }
-.grid { display:grid; grid-template-columns: minmax(10rem,1.1fr) 3rem 1fr 9rem; gap:.5rem .75rem; align-items:end; }
+.grid { display:grid; grid-template-columns: minmax(10rem,1.1fr) 3rem minmax(16rem,1.6fr) 9rem minmax(10rem,1fr); gap:.5rem .75rem; align-items:end; }
 .hdr { font-weight:600; color:#9ca3af; font-size:.75rem; margin-bottom:.25rem; }
 .slot { font-family: ui-monospace, monospace; color:#d1d5db; padding:.35rem 0; }
 @media (max-width:700px){ .grid { grid-template-columns:1fr; } }
@@ -286,6 +324,19 @@ def _sel(name: str, current: str) -> str:
     for o in opts:
         sel = " selected" if o == current else ""
         parts.append(f'<option value="{o}"{sel}>{html.escape(o)}</option>')
+    return f'<select name="{html.escape(name)}">{"".join(parts)}</select>'
+
+
+def _mode_sel(name: str, current: str, modes: list[str]) -> str:
+    options: list[tuple[str, str]] = [("", "global MODE"), ("auto", "auto"), ("default", "default")]
+    for m in modes:
+        options.append((m, m))
+    if current and all(v != current for v, _ in options):
+        options.append((current, current))
+    parts = []
+    for value, label in options:
+        sel = " selected" if value == current else ""
+        parts.append(f'<option value="{html.escape(value)}"{sel}>{html.escape(label)}</option>')
     return f'<select name="{html.escape(name)}">{"".join(parts)}</select>'
 
 
@@ -351,7 +402,8 @@ def _update_status_panel() -> str:
 def _form_page(
     env_map: dict[str, str],
     slots: list[tuple[str, str, str, str]],
-    row_labels: list[str],
+    row_meta: list[tuple[str, str]],
+    output_modes: dict[str, list[str]],
     msg: str,
     update_banner: str,
     update_available: bool,
@@ -363,10 +415,12 @@ def _form_page(
     rows_html = [
         '<div class="grid hdr"><div>Monitor</div><div>Slot</div><div>URL for this display</div><div>Rotation</div><div>Resolution</div></div>'
     ]
-    visible_count = min(len(slots), max(1, len(row_labels)))
+    visible_count = min(len(slots), max(1, len(row_meta)))
     for j in range(visible_count):
         slot, u, r, m = slots[j]
-        lab = row_labels[j] if j < len(row_labels) else f"Display {j + 1}"
+        lab = row_meta[j][0] if j < len(row_meta) else f"Display {j + 1}"
+        out_name = row_meta[j][1] if j < len(row_meta) else ""
+        modes = output_modes.get(out_name, [])
         rows_html.append(
             f'<div class="grid">'
             f'<div style="font-size:.82rem;line-height:1.25">{html.escape(lab)}</div>'
@@ -374,8 +428,7 @@ def _form_page(
             f'<div><input name="URL_{slot}" type="text" inputmode="url" value="{html.escape(u)}" '
             f'placeholder="https://…" title="This URL opens in the Chrome window for this monitor" autocomplete="off"/></div>'
             f'<div>{_sel(f"ROT_{slot}", r)}</div>'
-            f'<div><input name="MODE_{slot}" type="text" value="{html.escape(m)}" '
-            f'placeholder="auto or 1920x1080" title="Per-display mode/resolution. Empty = global MODE." autocomplete="off"/></div>'
+            f'<div>{_mode_sel(f"MODE_{slot}", m, modes)}</div>'
             f"</div>"
         )
 
@@ -532,7 +585,8 @@ class Handler(BaseHTTPRequestHandler):
         merged = _merge_kiosk(_load_kiosk_raw(path_json)) if os.path.isfile(path_json) else _default_kiosk()
         env_map = _form_env_map(merged)
         slots = _load_slots(merged)
-        labels = _display_row_labels(env_map, user, home)
+        row_meta = _display_row_meta(env_map, user, home)
+        output_modes = _xrandr_output_modes(user, home)
         ver = _fetch_latest_version()
         latest = ver.get("latest", "").strip()
         update_banner = ""
@@ -546,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
                 "</div>"
             )
         update_panel = _update_status_panel()
-        page = _form_page(env_map, slots, labels, msg, update_banner, update_available, update_panel)
+        page = _form_page(env_map, slots, row_meta, output_modes, msg, update_banner, update_available, update_panel)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
