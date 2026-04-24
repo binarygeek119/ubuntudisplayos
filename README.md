@@ -58,6 +58,7 @@ Everything the kiosk session and web UI need lives in **`/home/kiosk/.config/kio
 | **`mode`** | `auto` / `default` per panel, or one fixed mode for every head (e.g. `1920x1080`). |
 | **`screen_width`** / **`screen_height`** | Fallback when geometry cannot be read from `xrandr`. |
 | **`chrome_bin`** | Path to Chrome or Chromium. |
+| **`startup_delay_sec`** | Delay (seconds) before the first kiosk window launch for any setup; useful when target apps/services need extra startup time. If set to `0`, kiosk auto-adds **60s** when Docker is installed and at least one Docker image exists. |
 | **`displays`** | Array of objects **`{ "url": "…", "rotation": "normal" }`**, in order: index **0** = first / leftmost monitor, then **1**, … up to **24** slots in the web form. |
 
 **`rotation`** values: `normal`, `left`, `right`, `inverted`.
@@ -77,6 +78,7 @@ Example (abbreviated):
   "screen_width": "1024",
   "screen_height": "768",
   "chrome_bin": "/usr/bin/google-chrome-stable",
+  "startup_delay_sec": "0",
   "displays": [
     { "url": "https://example.com/", "rotation": "normal" },
     { "url": "https://example.org/", "rotation": "normal" }

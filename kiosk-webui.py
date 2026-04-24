@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.3"
+WEBUI_VERSION = "v1.0.7"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -76,6 +76,7 @@ def _default_kiosk() -> dict:
         "screen_width": "1024",
         "screen_height": "768",
         "chrome_bin": "/usr/bin/google-chrome-stable",
+        "startup_delay_sec": "0",
         "displays": [
             {"url": "http://127.0.0.1:9877", "rotation": "normal"},
             {"url": "http://127.0.0.1:9876", "rotation": "normal"},
@@ -96,6 +97,9 @@ def _canonical_keys(raw: dict) -> dict:
     for a, b in upl.items():
         if a in out and b not in out:
             out[b] = out.pop(a)
+    # Backward compatibility: old docker-only delay key.
+    if "docker_startup_delay_sec" in out and "startup_delay_sec" not in out:
+        out["startup_delay_sec"] = out.pop("docker_startup_delay_sec")
     return out
 
 
@@ -119,6 +123,7 @@ def _form_env_map(data: dict) -> dict[str, str]:
         "SCREEN_WIDTH": str(data.get("screen_width", "1024")),
         "SCREEN_HEIGHT": str(data.get("screen_height", "768")),
         "CHROME_BIN": str(data.get("chrome_bin", "/usr/bin/google-chrome-stable")),
+        "STARTUP_DELAY_SEC": str(data.get("startup_delay_sec", "0")),
     }
 
 
@@ -352,6 +357,7 @@ def _form_page(
 <h1>Kiosk — URLs per display <span style="font-size:.8rem;color:#9ca3af;margin-left:.5rem">{WEBUI_VERSION}</span></h1>
 <p>All settings are saved to <code>kiosk.json</code> on this machine. <strong>Each row</strong> maps to one physical monitor (slot <code>01</code> = first in <code>OUTPUT_LIST</code>). The row URL opens in that monitor's fullscreen Chrome window. Empty URL clears that slot (trailing empty slots are dropped on save).</p>
 <p><code>OUTPUT_LIST</code>: comma-separated <code>xrandr</code> names, or <code>auto</code> for all connected heads. Only detected displays are shown below.</p>
+<p><code>STARTUP_DELAY_SEC</code>: optional delay before first display launch (applies to all setups). Use this when your target web app needs extra boot time. If set to <code>0</code>, kiosk auto-uses <code>60</code> seconds when Docker is installed and at least one image exists.</p>
 {msg_html}
 {update_banner}
 {update_panel}
@@ -373,12 +379,17 @@ def _form_page(
     <div><label>SCREEN_HEIGHT</label><input name="SCREEN_HEIGHT" value="{g('SCREEN_HEIGHT', '768')}" autocomplete="off"/></div>
     <div></div>
   </div>
+  <div class="grid" style="margin-top:.5rem">
+    <div><label>STARTUP_DELAY_SEC</label><input name="STARTUP_DELAY_SEC" value="{g('STARTUP_DELAY_SEC', '0')}" inputmode="numeric" autocomplete="off"/></div>
+    <div></div>
+    <div></div>
+  </div>
   <h2 style="margin-top:1.5rem;font-size:1.05rem">Set URL (and rotation) for each display</h2>
   {''.join(rows_html)}
   <div class="actions">
     <button type="submit">Save to kiosk.json</button>
     <button type="submit" formaction="/reboot" formmethod="post" class="danger" onclick="return confirm('Reboot this kiosk now?');">Reboot system</button>
-    <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');" {'disabled title="Already up to date"' if not update_available else ''}>Update &amp; Reboot</button>
+    <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');">Update &amp; Reboot</button>
   </div>
 </form>
 <p style="margin-top:2rem;padding-top:1rem;border-top:1px solid #374151;font-size:.85rem;color:#9ca3af">
@@ -408,12 +419,19 @@ def _request_update() -> None:
         f.write("running\n")
     with open(UPDATE_LOG_FILE, "w", encoding="utf-8") as f:
         f.write(f"[{time.strftime('%F %T')}] update requested from web UI\n")
-    subprocess.Popen(  # noqa: S603,S607
+    proc = subprocess.Popen(  # noqa: S603,S607
         ["sudo", "-n", "/usr/local/bin/kiosk-self-update"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    # If sudo/helper fails immediately, surface it instead of leaving status stuck at "running".
+    time.sleep(0.25)
+    rc = proc.poll()
+    if rc not in (None, 0):
+        with open(UPDATE_STATUS_FILE, "w", encoding="utf-8") as f:
+            f.write("failed\n")
+        raise OSError("kiosk-self-update failed to start")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -502,14 +520,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/update":
-            ver = _fetch_latest_version()
-            latest = ver.get("latest", "").strip()
-            update_available = bool(latest and _version_key(latest) > _version_key(WEBUI_VERSION))
-            if not update_available:
-                self.send_response(303)
-                self.send_header("Location", "/?ok=4")
-                self.end_headers()
-                return
             try:
                 _request_update()
                 self.send_response(303)
@@ -552,10 +562,11 @@ class Handler(BaseHTTPRequestHandler):
             "screen_width": re.sub(r"[^0-9]", "", one("SCREEN_WIDTH")) or "1024",
             "screen_height": re.sub(r"[^0-9]", "", one("SCREEN_HEIGHT")) or "768",
             "chrome_bin": one("CHROME_BIN") or "/usr/bin/google-chrome-stable",
+            "startup_delay_sec": re.sub(r"[^0-9]", "", one("STARTUP_DELAY_SEC")) or "0",
             "displays": displays,
         }
         for k in list(prev.keys()):
-            if k not in out and k not in ("output_list", "mode", "screen_width", "screen_height", "chrome_bin", "displays"):
+            if k not in out and k not in ("output_list", "mode", "screen_width", "screen_height", "chrome_bin", "startup_delay_sec", "docker_startup_delay_sec", "displays"):
                 out[k] = prev[k]
 
         _write_kiosk(path_json, out)

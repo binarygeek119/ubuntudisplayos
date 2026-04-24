@@ -207,6 +207,7 @@ data = {
     "screen_width": sw or "1024",
     "screen_height": sh or "768",
     "chrome_bin": cb or "/usr/bin/google-chrome-stable",
+    "startup_delay_sec": "0",
     "displays": list(defaults_disp),
 }
 
@@ -267,6 +268,7 @@ defaults = {
     "screen_width": "1024",
     "screen_height": "768",
     "chrome_bin": "/usr/bin/google-chrome-stable",
+    "startup_delay_sec": "0",
     "displays": [
         {"url": "http://127.0.0.1:9877", "rotation": "normal"},
         {"url": "http://127.0.0.1:9876", "rotation": "normal"},
@@ -297,6 +299,7 @@ print(f'MODE={q(m.get("mode", "auto"))}')
 print(f'SCREEN_WIDTH={q(m.get("screen_width", "1024"))}')
 print(f'SCREEN_HEIGHT={q(m.get("screen_height", "768"))}')
 print(f'CHROME_BIN={q(m.get("chrome_bin", "/usr/bin/google-chrome-stable"))}')
+print(f'STARTUP_DELAY_SEC={q(m.get("startup_delay_sec", m.get("docker_startup_delay_sec", "0")))}')
 LOADPY
 )"
 }
@@ -312,6 +315,7 @@ G_W=()
 G_H=()
 G_X=()
 G_Y=()
+STARTUP_DELAY_APPLIED=0
 
 kiosk_keep_display_on() {
   # Drivers or clients sometimes re-enable DPMS; safe to call repeatedly.
@@ -363,6 +367,28 @@ clear_chrome_singleton_locks() {
     [[ -d "$d" ]] || continue
     rm -f "$d/SingletonLock" "$d/SingletonCookie" "$d/SingletonSocket" 2>/dev/null || true
   done
+}
+
+startup_delay_if_needed() {
+  local delay_raw delay=0
+  delay_raw="${STARTUP_DELAY_SEC:-0}"
+  if [[ "$delay_raw" =~ ^[0-9]+$ ]]; then
+    delay="$delay_raw"
+  fi
+  # Auto-delay for container-backed kiosks when user did not set a manual delay.
+  if (( delay == 0 )); then
+    if command -v docker >/dev/null 2>&1; then
+      if docker image ls -q 2>/dev/null | head -n 1 | grep -q .; then
+        delay=60
+        echo "[$(date '+%F %T')] docker images detected; auto startup delay set to 60s"
+      fi
+    fi
+  fi
+  (( delay > 0 )) || return 0
+  (( STARTUP_DELAY_APPLIED == 0 )) || return 0
+  echo "[$(date '+%F %T')] delaying first kiosk launch by ${delay}s"
+  sleep "$delay"
+  STARTUP_DELAY_APPLIED=1
 }
 
 kiosk_tabs_unhealthy() {
@@ -526,6 +552,7 @@ parse_output_geom() {
 
 launch_kiosk() {
   read_url_slots
+  startup_delay_if_needed
   if ! resolve_browser_bin; then
     return 1
   fi
