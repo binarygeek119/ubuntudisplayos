@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.7"
+WEBUI_VERSION = "v1.0.8"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -338,19 +338,6 @@ def _form_page(
         )
 
     msg_html = f'<p style="color:#86efac">{html.escape(msg)}</p>' if msg else ""
-    update_poll_js = """
-<script>
-(() => {
-  const label = document.getElementById("update-status-label");
-  if (!label) return;
-  const txt = (label.textContent || "").toLowerCase();
-  if (txt.includes("running")) {
-    setTimeout(() => window.location.reload(), 2000);
-  }
-})();
-</script>
-""" if update_panel else ""
-
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Kiosk display config</title><style>{PAGE_CSS}</style></head><body>
@@ -398,7 +385,6 @@ Community:
 <span style="color:#6b7280"> — </span>
 <span>Ubuntu Display OS / kiosk discussion</span>
 </p>
-{update_poll_js}
 </body></html>"""
     return body.encode("utf-8")
 
