@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.0.13"
+WEBUI_VERSION = "v1.0.14"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -552,6 +552,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        user, home, path_json = _kiosk_paths()
         if parsed.path == "/reboot":
             try:
                 _request_reboot()
@@ -598,7 +599,6 @@ class Handler(BaseHTTPRequestHandler):
         def one(name: str) -> str:
             return (form.get(name, [""])[0] or "").strip()
 
-        user, home, path_json = _kiosk_paths()
         os.makedirs(os.path.dirname(path_json), mode=0o700, exist_ok=True)
 
         prev = _merge_kiosk(_load_kiosk_raw(path_json)) if os.path.isfile(path_json) else _default_kiosk()
