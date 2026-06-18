@@ -4,7 +4,7 @@ Turn **Ubuntu Server/Desktop 24.04** into a **multi-display web kiosk**: one ful
 
 Repository: [github.com/binarygeek119/ubuntudisplayos](https://github.com/binarygeek119/ubuntudisplayos)
 
-**Discord:** [https://discord.gg/vftKQvpT](https://discord.gg/vftKQvpT) — community and kiosk discussion.
+**Discord:** https://discord.gg/AEhVjqX4Af — community and kiosk discussion.
 
 > Built purely with AI assistance.
 
