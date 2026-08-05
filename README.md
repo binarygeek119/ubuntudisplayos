@@ -120,7 +120,7 @@ After install (with `kiosk-webui.py` present):
 
 - **Program:** `/usr/lib/kiosk-webui/kiosk-webui.py` · **CLI:** `kiosk-webui` (symlink) · **Config:** `/etc/kiosk-webui.env`
 - **Desktop:** “Kiosk display config” in the system application menu (uses `xdg-open` to `http://127.0.0.1:8780/`).
-- Service: `kiosk-webui.service` (runs as user `kiosk`), **enabled on boot** via `multi-user.target` and `graphical.target` (starts even before the GUI session is up).
+- Service: `kiosk-webui.service` (runs as **root**; still manages files for user `kiosk` via `KIOSK_USER`), **enabled on boot** via `multi-user.target` and `graphical.target` (starts even before the GUI session is up).
 - Default listen: **`0.0.0.0:8780`** — **no token**; host and port come from **`BIND`** and **`PORT`** in `/etc/kiosk-webui.env` (defaults shown here).
 
 ### Web URLs (config UI)
@@ -135,12 +135,22 @@ Use plain **HTTP** (not HTTPS). Replace **`<host>`** with the kiosk’s IP or ho
 | **Connected outputs (JSON)** | `http://<host>:8780/api/xrandr.json` |
 | **Save** (browser only) | `POST` to `http://<host>:8780/save` (use the form; no separate login page) |
 | **Reboot system** (browser button) | `POST` to `http://<host>:8780/reboot` |
-| **Update WebUI** (browser button) | `POST` to `http://<host>:8780/update` (runs installer refresh in background) |
+| **Update & Reboot** (browser button) | `POST` to `http://<host>:8780/update` (runs installer refresh in background, then reboots) |
+| **Update PosterX Docker** (browser button) | `POST` to `http://<host>:8780/update-posterrx` (pulls `binarygeek119/posterrx:latest` and recreates the `posterr` container) |
 
 - **`BIND=0.0.0.0`** (default): listen on **all interfaces** — use the kiosk’s LAN address from another device, or `127.0.0.1` on the kiosk itself.
 - **`BIND=127.0.0.1`**: only **this machine** can open the URLs above; use SSH port forwarding to reach it remotely.
 - **`KIOSK_WEBUI_UPDATE_CHECK_MIN`** (optional env var): background task interval (minutes) for checking whether a newer WebUI version exists; default **10**.
 
+**PosterX Docker updates:** the web UI button runs `/usr/local/bin/kiosk-posterrx-update` (installed by `install-kiosk.sh`, passwordless via sudoers). Defaults come from **`/etc/kiosk-posterrx-update.env`**:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `POSTERRX_IMAGE` | `binarygeek119/posterrx:latest` | Image to `docker pull` |
+| `POSTERRX_CONTAINER` | `posterr` | Container to recreate |
+| `POSTERRX_COMPOSE_DIR` | *(empty)* | Optional compose project dir; when empty, auto-detects from compose labels or recreates a `docker run` container from inspect |
+
+Status/log: `/tmp/kiosk-posterrx-update.status` and `/tmp/kiosk-posterrx-update.log`. After changing the env file, no service restart is required (read on each update). Rerun **`sudo ./install-kiosk.sh`** (or `KIOSK_UPDATE_ONLY=1`) on existing kiosks to install the helper and sudoers entry.
 The form edits **`output_list`**, global video settings, and up to **24** URL/rotation rows. Each row is labeled for the matching monitor (from `output_list` or live `xrandr` when `output_list` is `auto`). The URL in a row is what Chrome opens fullscreen on that monitor. Saving writes **`/home/kiosk/.config/kiosk.json`**; trailing rows with an empty URL are dropped.
 
 If a rotation does not apply on a specific host/GPU, check the kiosk log (`/home/kiosk/.config/kiosk-autostart.log`) for `xrandr` warnings; the launcher now retries rotation per output when a combined `xrandr` command fails.
@@ -151,7 +161,7 @@ If a rotation does not apply on a specific host/GPU, check the kiosk log (`/home
 curl -sS http://127.0.0.1:8780/api/xrandr.json
 ```
 
-**Security:** there is **no authentication** on the web UI. Anyone who can reach the port can change kiosk URLs/settings, **trigger a reboot**, and run the **Update WebUI** action (installer grants `kiosk` passwordless access to limited helper commands via `/etc/sudoers.d/`). For a closed network or single-machine use, set **`BIND=127.0.0.1`** in `/etc/kiosk-webui.env` and use SSH port forwarding if you need remote access. After editing the env file: `sudo systemctl restart kiosk-webui`.
+**Security:** there is **no authentication** on the web UI. The service runs as **root**, so anyone who can reach the port can change kiosk URLs/settings, **trigger a reboot**, run **Update & Reboot**, and **Update PosterX Docker**. For a closed network or single-machine use, set **`BIND=127.0.0.1`** in `/etc/kiosk-webui.env` and use SSH port forwarding if you need remote access. After editing the env file: `sudo systemctl restart kiosk-webui`.
 
 ## Repository layout
 

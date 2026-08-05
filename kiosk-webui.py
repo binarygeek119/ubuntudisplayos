@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_SLOTS = 24
 ROT_OK = frozenset({"normal", "left", "right", "inverted"})
-WEBUI_VERSION = "v1.2.0"
+WEBUI_VERSION = "v1.3.1"
 DISCORD_INVITE_URL = "https://discord.gg/vftKQvpT"
 DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/binarygeek119/ubuntudisplayos/main/kiosk-webui.py"
 _VERSION_CACHE_TTL_SEC = 300
@@ -29,6 +29,9 @@ _version_cache_ts = 0.0
 _version_cache_payload: dict[str, str] | None = None
 UPDATE_STATUS_FILE = "/tmp/kiosk-self-update.status"
 UPDATE_LOG_FILE = "/tmp/kiosk-self-update.log"
+POSTERRX_UPDATE_STATUS_FILE = "/tmp/kiosk-posterrx-update.status"
+POSTERRX_UPDATE_LOG_FILE = "/tmp/kiosk-posterrx-update.log"
+POSTERRX_UPDATE_HELPER = "/usr/local/bin/kiosk-posterrx-update"
 
 
 def _conf() -> dict[str, str]:
@@ -382,21 +385,40 @@ def _start_update_check_task() -> None:
     t.start()
 
 
-def _update_status_panel() -> str:
-    status = _read_text(UPDATE_STATUS_FILE).strip().lower()
+def _status_panel(title: str, status_file: str, log_file: str, label_id: str) -> str:
+    status = _read_text(status_file).strip().lower()
     if status not in {"running", "success", "failed"}:
         return ""
-    log_txt = _read_text(UPDATE_LOG_FILE)
+    log_txt = _read_text(log_file)
     lines = [ln for ln in log_txt.splitlines() if ln.strip()]
     tail = "\n".join(lines[-30:]) if lines else "(no output yet)"
     color = "#93c5fd" if status == "running" else ("#86efac" if status == "success" else "#fca5a5")
     return (
         '<div style="margin:.75rem 0;padding:.6rem .75rem;border:1px solid #374151;'
         'background:#111827;border-radius:.35rem">'
-        f'<div id="update-status-label" style="font-weight:600;color:{color};margin-bottom:.35rem">Update status: {html.escape(status)}</div>'
+        f'<div id="{html.escape(label_id)}" style="font-weight:600;color:{color};margin-bottom:.35rem">'
+        f"{html.escape(title)}: {html.escape(status)}</div>"
         f'<pre style="margin:0;white-space:pre-wrap;color:#d1d5db;font-size:.78rem">{html.escape(tail)}</pre>'
         "</div>"
     )
+
+
+def _update_status_panel() -> str:
+    return _status_panel("Update status", UPDATE_STATUS_FILE, UPDATE_LOG_FILE, "update-status-label")
+
+
+def _posterrx_update_status_panel() -> str:
+    return _status_panel(
+        "PosterX Docker update",
+        POSTERRX_UPDATE_STATUS_FILE,
+        POSTERRX_UPDATE_LOG_FILE,
+        "posterrx-update-status-label",
+    )
+
+
+def _posterrx_update_available() -> bool:
+    """True when the PosterX Docker update helper is installed (rerun installer if missing)."""
+    return os.path.isfile(POSTERRX_UPDATE_HELPER) and os.access(POSTERRX_UPDATE_HELPER, os.X_OK)
 
 
 def _form_page(
@@ -408,6 +430,8 @@ def _form_page(
     update_banner: str,
     update_available: bool,
     update_panel: str,
+    posterrx_panel: str,
+    posterrx_helper_ok: bool,
 ) -> bytes:
     def g(key: str, default: str = "") -> str:
         return html.escape(env_map.get(key, default))
@@ -443,6 +467,7 @@ def _form_page(
 {msg_html}
 {update_banner}
 {update_panel}
+{posterrx_panel}
 <form method="post" action="/save">
   <div class="grid" style="margin-top:.25rem">
     <div style="grid-column:1 / span 2">
@@ -474,6 +499,7 @@ def _form_page(
     <button type="submit" formaction="/fix-layout" formmethod="post" class="warn" onclick="return confirm('Fix Chrome layout now? This should restore one browser window per display.');">Fix Chrome layout</button>
     <button type="submit" formaction="/reboot" formmethod="post" class="danger" onclick="return confirm('Reboot this kiosk now?');">Reboot system</button>
     <button type="submit" formaction="/update" formmethod="post" class="warn" onclick="return confirm('Install update now? System will reboot when finished.');">Update &amp; Reboot</button>
+    <button type="submit" formaction="/update-posterrx" formmethod="post" class="warn"{"" if posterrx_helper_ok else " disabled"} onclick="return confirm('Pull latest PosterX Docker image and recreate the posterr container? Kiosk pages may briefly disconnect.');"{"" if posterrx_helper_ok else ' title="Run install-kiosk.sh to enable PosterX Docker updates"'}>Update PosterX Docker</button>
   </div>
 </form>
 <p style="margin-top:2rem;padding-top:1rem;border-top:1px solid #374151;font-size:.85rem;color:#9ca3af">
@@ -486,10 +512,17 @@ Community:
     return body.encode("utf-8")
 
 
+def _root_cmd(argv: list[str]) -> list[str]:
+    """Prefix with sudo -n only when not already root (legacy non-root service)."""
+    if os.geteuid() == 0:
+        return argv
+    return ["sudo", "-n", *argv]
+
+
 def _request_reboot() -> None:
-    """Best-effort reboot request; installer grants kiosk NOPASSWD for this command."""
+    """Best-effort reboot request; root service or installer sudoers for kiosk user."""
     subprocess.run(
-        ["sudo", "-n", "/usr/bin/systemctl", "reboot"],
+        _root_cmd(["/usr/bin/systemctl", "reboot"]),
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -503,18 +536,40 @@ def _request_update() -> None:
     with open(UPDATE_LOG_FILE, "w", encoding="utf-8") as f:
         f.write(f"[{time.strftime('%F %T')}] update requested from web UI\n")
     proc = subprocess.Popen(  # noqa: S603,S607
-        ["sudo", "-n", "/usr/local/bin/kiosk-self-update"],
+        _root_cmd(["/usr/local/bin/kiosk-self-update"]),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    # If sudo/helper fails immediately, surface it instead of leaving status stuck at "running".
+    # If helper fails immediately, surface it instead of leaving status stuck at "running".
     time.sleep(0.25)
     rc = proc.poll()
     if rc not in (None, 0):
         with open(UPDATE_STATUS_FILE, "w", encoding="utf-8") as f:
             f.write("failed\n")
         raise OSError("kiosk-self-update failed to start")
+
+
+def _request_posterrx_update() -> None:
+    """Pull PosterX image and recreate container via update helper."""
+    if not _posterrx_update_available():
+        raise OSError("kiosk-posterrx-update helper not installed")
+    with open(POSTERRX_UPDATE_STATUS_FILE, "w", encoding="utf-8") as f:
+        f.write("running\n")
+    with open(POSTERRX_UPDATE_LOG_FILE, "w", encoding="utf-8") as f:
+        f.write(f"[{time.strftime('%F %T')}] PosterX Docker update requested from web UI\n")
+    proc = subprocess.Popen(  # noqa: S603,S607
+        _root_cmd([POSTERRX_UPDATE_HELPER]),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(0.25)
+    rc = proc.poll()
+    if rc not in (None, 0):
+        with open(POSTERRX_UPDATE_STATUS_FILE, "w", encoding="utf-8") as f:
+            f.write("failed\n")
+        raise OSError("kiosk-posterrx-update failed to start")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -557,31 +612,17 @@ class Handler(BaseHTTPRequestHandler):
 
         q = urllib.parse.parse_qs(parsed.query)
         ok = q.get("ok", [""])[0]
-        msg = (
-            "Saved."
-            if ok == "1"
-            else (
-                "Reboot requested."
-                if ok == "2"
-                else (
-                    "Update started."
-                    if ok == "3"
-                    else (
-                        "Pages reloaded."
-                        if ok == "5"
-                        else (
-                        "Chrome layout fix started."
-                        if ok == "6"
-                        else (
-                            "Reboot failed (check sudoers)."
-                            if ok == "reboot_failed"
-                            else ("Update failed (check sudoers/script)." if ok == "update_failed" else "")
-                        )
-                        )
-                    )
-                )
-            )
-        )
+        msg = {
+            "1": "Saved.",
+            "2": "Reboot requested.",
+            "3": "Update started.",
+            "4": "PosterX Docker update started.",
+            "5": "Pages reloaded.",
+            "6": "Chrome layout fix started.",
+            "reboot_failed": "Reboot failed (check sudoers).",
+            "update_failed": "Update failed (check sudoers/script).",
+            "posterrx_update_failed": "PosterX Docker update failed (check sudoers/Docker/helper).",
+        }.get(ok, "")
         merged = _merge_kiosk(_load_kiosk_raw(path_json)) if os.path.isfile(path_json) else _default_kiosk()
         env_map = _form_env_map(merged)
         slots = _load_slots(merged)
@@ -596,11 +637,24 @@ class Handler(BaseHTTPRequestHandler):
                 '<div style="margin:.75rem 0;padding:.6rem .75rem;border:1px solid #7c2d12;'
                 'background:#431407;border-radius:.35rem;color:#fed7aa">'
                 f'New version available: <strong>{html.escape(latest)}</strong> '
-                f'(current {html.escape(WEBUI_VERSION)}). Click <strong>Update WebUI</strong> below.'
+                f'(current {html.escape(WEBUI_VERSION)}). Click <strong>Update &amp; Reboot</strong> below.'
                 "</div>"
             )
         update_panel = _update_status_panel()
-        page = _form_page(env_map, slots, row_meta, output_modes, msg, update_banner, update_available, update_panel)
+        posterrx_panel = _posterrx_update_status_panel()
+        posterrx_helper_ok = _posterrx_update_available()
+        page = _form_page(
+            env_map,
+            slots,
+            row_meta,
+            output_modes,
+            msg,
+            update_banner,
+            update_available,
+            update_panel,
+            posterrx_panel,
+            posterrx_helper_ok,
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -629,6 +683,17 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self.send_response(303)
                 self.send_header("Location", "/?ok=update_failed")
+            self.end_headers()
+            return
+
+        if parsed.path == "/update-posterrx":
+            try:
+                _request_posterrx_update()
+                self.send_response(303)
+                self.send_header("Location", "/?ok=4")
+            except OSError:
+                self.send_response(303)
+                self.send_header("Location", "/?ok=posterrx_update_failed")
             self.end_headers()
             return
 

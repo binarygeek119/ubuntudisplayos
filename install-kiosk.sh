@@ -916,6 +916,209 @@ UPDATESUDO
     }
   fi
 
+  # PosterX / posterrX Docker update helper (pull image + recreate container).
+  if [[ ! -f /etc/kiosk-posterrx-update.env ]]; then
+    umask 022
+    {
+      printf '%s\n' '# Image/tag to pull (Docker Hub).'
+      printf '%s\n' 'POSTERRX_IMAGE=binarygeek119/posterrx:latest'
+      printf '%s\n' '# Running container name.'
+      printf '%s\n' 'POSTERRX_CONTAINER=posterr'
+      printf '%s\n' '# Optional: compose project directory (auto-detected from container labels when empty).'
+      printf '%s\n' 'POSTERRX_COMPOSE_DIR='
+    } >/etc/kiosk-posterrx-update.env
+    chmod 644 /etc/kiosk-posterrx-update.env
+  fi
+
+  cat >/usr/local/bin/kiosk-posterrx-update <<'POSTERRXUPDATE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATUS_FILE="/tmp/kiosk-posterrx-update.status"
+LOG_FILE="/tmp/kiosk-posterrx-update.log"
+ENV_FILE="/etc/kiosk-posterrx-update.env"
+
+IMAGE="binarygeek119/posterrx:latest"
+CONTAINER="posterr"
+COMPOSE_DIR=""
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  set -a
+  # Only import known keys (ignore comments/blank).
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -z "$line" || "$line" != *=* ]] && continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    val="${val%\"}"; val="${val#\"}"
+    val="${val%\'}"; val="${val#\'}"
+    case "$key" in
+      POSTERRX_IMAGE) IMAGE="$val" ;;
+      POSTERRX_CONTAINER) CONTAINER="$val" ;;
+      POSTERRX_COMPOSE_DIR) COMPOSE_DIR="$val" ;;
+    esac
+  done <"$ENV_FILE"
+  set +a
+fi
+
+echo "running" >"$STATUS_FILE"
+{
+  echo "[$(date '+%F %T')] PosterX Docker update start"
+  echo "image=${IMAGE} container=${CONTAINER} compose_dir=${COMPOSE_DIR:-"(auto)"}"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: docker not installed" >&2
+    exit 1
+  fi
+
+  echo "[$(date '+%F %T')] pulling ${IMAGE}"
+  docker pull "$IMAGE"
+
+  compose_up() {
+    local dir="$1"
+    echo "[$(date '+%F %T')] compose up in ${dir}"
+    cd "$dir"
+    # Hub image may be named differently than a local compose `image:` tag (e.g. posterrx).
+    local local_tag="${IMAGE##*/}"
+    local_tag="${local_tag%%:*}"
+    if [[ -n "$local_tag" && "$IMAGE" != "$local_tag" && "$IMAGE" != "${local_tag}:latest" ]]; then
+      echo "[$(date '+%F %T')] tagging ${IMAGE} as ${local_tag}:latest (and ${local_tag})"
+      docker tag "$IMAGE" "${local_tag}:latest" || true
+      docker tag "$IMAGE" "$local_tag" || true
+    fi
+    if docker compose version >/dev/null 2>&1; then
+      docker compose pull || true
+      docker compose up -d --no-build --force-recreate
+    elif command -v docker-compose >/dev/null 2>&1; then
+      docker-compose pull || true
+      docker-compose up -d --no-build --force-recreate
+    else
+      echo "ERROR: docker compose not available" >&2
+      return 1
+    fi
+  }
+
+  recreate_from_inspect() {
+    local name="$1"
+    local new_image="$2"
+    echo "[$(date '+%F %T')] recreating container ${name} with ${new_image}"
+    python3 - "$name" "$new_image" <<'PY'
+import json, subprocess, sys
+
+name, image = sys.argv[1], sys.argv[2]
+data = json.loads(subprocess.check_output(["docker", "inspect", name], text=True))[0]
+cfg, host = data["Config"], data["HostConfig"]
+tmp = name + ".new"
+# Remove any leftover temp container from a previous failed run.
+subprocess.run(["docker", "rm", "-f", tmp], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+args = ["docker", "create", "--name", tmp]
+rp = host.get("RestartPolicy") or {}
+rp_name = (rp.get("Name") or "").strip()
+if rp_name and rp_name != "no":
+    if rp_name == "on-failure":
+        args += ["--restart", f"on-failure:{int(rp.get('MaximumRetryCount') or 0)}"]
+    else:
+        args += ["--restart", rp_name]
+
+for e in cfg.get("Env") or []:
+    args += ["-e", e]
+
+for b in host.get("Binds") or []:
+    args += ["-v", b]
+
+# Named volumes not already covered by Binds.
+bind_dests = set()
+for b in host.get("Binds") or []:
+    parts = b.split(":")
+    if len(parts) >= 2:
+        bind_dests.add(parts[1])
+for m in data.get("Mounts") or []:
+    if m.get("Type") == "volume" and m.get("Name") and m.get("Destination"):
+        if m["Destination"] in bind_dests:
+            continue
+        spec = f"{m['Name']}:{m['Destination']}"
+        if not m.get("RW", True):
+            spec += ":ro"
+        args += ["-v", spec]
+
+pb = host.get("PortBindings") or {}
+for cport, bindings in pb.items():
+    for b in bindings or []:
+        hip = (b.get("HostIp") or "").strip()
+        hport = (b.get("HostPort") or "").strip()
+        left = f"{hip}:{hport}" if hip else hport
+        args += ["-p", f"{left}:{cport}" if left else cport]
+
+for h in host.get("ExtraHosts") or []:
+    args += ["--add-host", h]
+
+net = (host.get("NetworkMode") or "").strip()
+if net and net not in ("default", "bridge", "host", "none") and not net.startswith("container:"):
+    # User-defined / compose network name
+    args += ["--network", net]
+elif net in ("host", "none"):
+    args += ["--network", net]
+
+if cfg.get("Hostname"):
+    args += ["--hostname", cfg["Hostname"]]
+if host.get("Privileged"):
+    args.append("--privileged")
+cap_add = host.get("CapAdd") or []
+for c in cap_add:
+    if c:
+        args += ["--cap-add", c]
+
+args.append(image)
+cmd = cfg.get("Cmd")
+if cmd:
+    args += list(cmd)
+
+subprocess.check_call(args)
+was_running = bool(data.get("State", {}).get("Running"))
+subprocess.check_call(["docker", "stop", name])
+subprocess.check_call(["docker", "rm", name])
+subprocess.check_call(["docker", "rename", tmp, name])
+if was_running:
+    subprocess.check_call(["docker", "start", name])
+print(f"recreated {name} -> {image}")
+PY
+  }
+
+  if [[ -n "$COMPOSE_DIR" ]]; then
+    [[ -d "$COMPOSE_DIR" ]] || { echo "ERROR: POSTERRX_COMPOSE_DIR not a directory: $COMPOSE_DIR" >&2; exit 1; }
+    compose_up "$COMPOSE_DIR"
+  elif docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    WORKDIR="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$CONTAINER" 2>/dev/null || true)"
+    if [[ -n "${WORKDIR}" && -d "${WORKDIR}" ]]; then
+      compose_up "$WORKDIR"
+    else
+      # Ensure container will use the pulled Hub image (not a stale local tag).
+      recreate_from_inspect "$CONTAINER" "$IMAGE"
+    fi
+  else
+    echo "WARN: container '${CONTAINER}' not found; image pulled only. Start PosterX manually or set POSTERRX_COMPOSE_DIR."
+  fi
+
+  echo "[$(date '+%F %T')] PosterX Docker update complete"
+} >"$LOG_FILE" 2>&1 && echo "success" >"$STATUS_FILE" || { echo "failed" >"$STATUS_FILE"; exit 1; }
+POSTERRXUPDATE
+  chmod 755 /usr/local/bin/kiosk-posterrx-update
+
+  cat >/etc/sudoers.d/kiosk-webui-posterrx-update <<'POSTERRXSUDO'
+# Allow kiosk web UI service to run PosterX Docker update helper without password.
+kiosk ALL=(root) NOPASSWD: /usr/local/bin/kiosk-posterrx-update
+POSTERRXSUDO
+  chmod 440 /etc/sudoers.d/kiosk-webui-posterrx-update
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf /etc/sudoers.d/kiosk-webui-posterrx-update >/dev/null || {
+      echo "ERROR: invalid sudoers file /etc/sudoers.d/kiosk-webui-posterrx-update" >&2
+      exit 1
+    }
+  fi
+
   cat >/etc/systemd/system/kiosk-webui.service <<'WEBUISVC'
 [Unit]
 Description=Kiosk display and URL web config
@@ -924,8 +1127,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=kiosk
-Group=kiosk
+# Runs as root so reboot / self-update / PosterX Docker update work without sudoers.
+# Kiosk session files still live under KIOSK_USER (default: kiosk).
 EnvironmentFile=/etc/kiosk-webui.env
 Environment=KIOSK_USER=kiosk
 ExecStart=/usr/bin/kiosk-webui
